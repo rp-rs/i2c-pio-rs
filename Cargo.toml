@@ -1,0 +1,21 @@
+[package]
+name = "i2c-pio"
+version = "0.1.0"
+edition = "2018"
+license = "Apache-2.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+embedded-hal = "*"
+embedded-time = "*"
+rp2040-hal = { git = "https://github.com/rp-rs/rp-hal.git", branch = "main" }
+pio = { git = "https://github.com/rp-rs/pio-rs.git", branch = "main" }
+nb = "1.0.0"
+cortex-m = "0.7.3"
+
+[patch.'https://github.com/rp-rs/pio-rs.git']
+pio = { path = "../pio-rs" }
+
+[patch.'https://github.com/rp-rs/rp-hal.git']
+rp2040-hal = { path = "../rp-hal/rp2040-hal" }
