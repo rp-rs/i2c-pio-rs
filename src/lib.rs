@@ -226,11 +226,11 @@ where
         let scl = scl.into_pull_up_input();
 
         // This will pull the bus high for a little bit of time
-        sm.set_pins_with_iter([
+        sm.set_pins([
             (SCL::DYN.num, PinState::High),
             (SDA::DYN.num, PinState::High),
         ]);
-        sm.set_pindirs_with_iter([
+        sm.set_pindirs([
             (SCL::DYN.num, PinDir::Output),
             (SDA::DYN.num, PinDir::Output),
         ]);
@@ -246,7 +246,7 @@ where
         scl.set_output_enable_override(rp2040_hal::gpio::OutputEnableOverride::Invert);
 
         // the PIO now keeps the pin as Input, we can set the pin state to Low.
-        sm.set_pins_with_iter([(SDA::DYN.num, PinState::Low), (SCL::DYN.num, PinState::Low)]);
+        sm.set_pins([(SDA::DYN.num, PinState::Low), (SCL::DYN.num, PinState::Low)]);
 
         // Set the state machine on the entry point.
         sm.set_instruction(
