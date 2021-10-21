@@ -142,69 +142,51 @@ where
         let mut do_exec = a.label();
 
         a.bind(&mut &mut handle_nack);
-        /* 14 */
         // continue if NAK was expected
         a.jmp(pio::JmpCondition::YDecNonZero, &mut wrap_target);
-        /* 15 */
         // Otherwise stop, ask for help (raises the irq line (0+SM::id())%4)
         a.irq(false, true, 0, true);
 
         a.bind(&mut send_byte);
-        /* 16 */
         // Unpack Final
         a.out(pio::OutDestination::Y, 1);
-        /* 17 */
         // loop 8 times
         a.set(pio::SetDestination::X, 7);
 
         // Send 1 byte
         a.bind(&mut bitloop);
-        /* 18 */
         // Serialize write data (all-ones is reading)
         a.out_with_delay(pio::OutDestination::PINDIRS, 1, 7);
-        /* 19 */
         // SCL rising edge
         a.nop_with_delay_and_side_set(2, 1);
-        /* 20 */
         // Allow clock to be stretched
         a.wait_with_delay(1, pio::WaitSource::GPIO, SCL::DYN.num, 4);
-        /* 21 */
         // Sample read data in middle of SCL pulse
         a.in_with_delay(pio::InSource::PINS, 1, 7);
-        /* 22 */
         // SCL falling edge
         a.jmp_with_delay_and_side_set(pio::JmpCondition::XDecNonZero, &mut bitloop, 7, 0);
 
         // handle ACK pulse
-        /* 23 */
         // On reads, we provide the ACK
         a.out_with_delay(pio::OutDestination::PINDIRS, 1, 7);
-        /* 24 */
         // SCL risin edge
         a.nop_with_delay_and_side_set(7, 1);
-        /* 25 */
         // Allow clock to be stretched
         a.wait_with_delay(1, pio::WaitSource::GPIO, SCL::DYN.num, 7);
-        /* 26 */
         // Test SDA for ACK/NACK, fall through if ACK
         a.jmp_with_delay_and_side_set(pio::JmpCondition::PinHigh, &mut handle_nack, 2, 0);
 
         a.bind(&mut wrap_target);
-        /* 27 */
         // Unpack Instr count
         a.out(pio::OutDestination::X, 6);
-        /* 28 */
         // Instr == 0, this is a data record
         a.jmp(pio::JmpCondition::XIsZero, &mut send_byte);
-        /* 29 */
         // Instr > 0, remainder of this OSR is invalid
         a.out(pio::OutDestination::NULL, 32);
 
         a.bind(&mut do_exec);
-        /* 30 */
         // Execute one instruction per FIFO word
         a.out(pio::OutDestination::EXEC, 16);
-        /* 31 */
         a.jmp(pio::JmpCondition::XDecNonZero, &mut do_exec);
         a.bind(&mut wrap_source);
 
