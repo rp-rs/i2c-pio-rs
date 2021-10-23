@@ -502,7 +502,7 @@ where
         self.setup(address, false, false);
         self.write(bytes);
         if !self.has_errored() {
-            self.setup(address, false, true);
+            self.setup(address, true, true);
             self.read::<A>(buffer);
         }
         self.finish()
