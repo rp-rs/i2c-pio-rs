@@ -201,7 +201,7 @@ where
 
         // init
         let (mut sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_program(installed)
-            // only use TX FIFO
+            // use both RX & TX FIFO
             .buffers(rp2040_hal::pio::Buffers::RxTx)
             // Pin configuration
             .set_pins(SDA::DYN.num, 1)
