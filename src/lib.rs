@@ -609,3 +609,39 @@ where
         self.finish()
     }
 }
+
+#[cfg(feature = "eh1_0_alpha")]
+mod eh1_0_alpha {
+    use super::Error;
+    use super::I2C;
+
+    impl<A, P, SM, SDA, SCL> eh1::Write for I2C<'_, P, SM, SDA, SCL>
+    where
+        A: Copy + AddressMode + Into<u16> + 'static,
+        P: PIOExt + FunctionConfig,
+        SM: ValidStateMachine<PIO = P>,
+        SDA: PinId,
+        SCL: PinId,
+        Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
+    {
+        type Error = Error;
+
+        fn write(&mut self, addr: u8, bytes: &[u8]) -> Result<(), Error> {
+            Write::write(self, addr, bytes)
+        }
+    }
+    impl<T: Deref<Target = Block>, PINS> eh1::WriteRead for I2C<T, PINS, Controller> {
+        type Error = Error;
+
+        fn write_read(&mut self, addr: u8, bytes: &[u8], buffer: &mut [u8]) -> Result<(), Error> {
+            WriteRead::write_read(self, addr, bytes, buffer)
+        }
+    }
+    impl<T: Deref<Target = Block>, PINS> eh1::Read for I2C<T, PINS, Controller> {
+        type Error = Error;
+
+        fn read(&mut self, addr: u8, buffer: &mut [u8]) -> Result<(), Error> {
+            Read::read(self, addr, buffer)
+        }
+    }
+}

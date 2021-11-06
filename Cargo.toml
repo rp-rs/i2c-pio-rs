@@ -7,12 +7,13 @@ license = "Apache-2.0"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-embedded-hal = "*"
-embedded-time = "*"
-rp2040-hal = { git = "https://github.com/rp-rs/rp-hal.git", branch = "main" }
-pio = { git = "https://github.com/rp-rs/pio-rs.git", branch = "main" }
-nb = "1.0.0"
 cortex-m = "0.7.3"
+eh1_0_alpha = { version = "=1.0.0-alpha.5", package = "embedded-hal", optional = true }
+embedded-hal = "0.2.6"
+embedded-time = "0.12.0"
+nb = "1.0.0"
+pio = { git = "https://github.com/rp-rs/pio-rs.git", branch = "main" }
+rp2040-hal = { git = "https://github.com/rp-rs/rp-hal.git", branch = "main" }
 
 [patch.'https://github.com/rp-rs/pio-rs.git']
 pio = { path = "../pio-rs" }
