@@ -45,7 +45,7 @@ use embedded_hal::blocking::i2c::{self, AddressMode, Operation, TenBitAddress};
 use embedded_time::fixed_point::FixedPoint;
 use pio::{Instruction, InstructionOperands, SideSet};
 use rp2040_hal::{
-    gpio::{Disabled, DisabledConfig, Pin, PinId, PinMode, ValidPinMode},
+    gpio::{Disabled, DisabledConfig, Function, FunctionConfig, Pin, PinId, ValidPinMode},
     pio::{
         PIOExt, PinDir, PinState, Rx, ShiftDirection, StateMachine, StateMachineIndex, Tx,
         UninitStateMachine, ValidStateMachine, PIO,
@@ -96,29 +96,29 @@ const DATA_OFFSET: usize = 1;
 pub struct Error;
 
 /// Instance of WS2812 LED chain.
-pub struct I2C<'pio, P, SM, SDA, SCL, PinFunc>
+pub struct I2C<'pio, P, SM, SDA, SCL>
 where
-    P: PIOExt,
+    P: PIOExt + FunctionConfig,
     SM: ValidStateMachine<PIO = P>,
     SDA: PinId,
     SCL: PinId,
-    PinFunc: PinMode + ValidPinMode<SDA> + ValidPinMode<SCL>,
+    Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
 {
     pio: &'pio mut PIO<P>,
     sm: StateMachine<SM, rp2040_hal::pio::Running>,
     tx: Tx<SM>,
     rx: Rx<SM>,
-    _sda: Pin<SDA, PinFunc>,
-    _scl: Pin<SCL, PinFunc>,
+    _sda: Pin<SDA, Function<P>>,
+    _scl: Pin<SCL, Function<P>>,
 }
 
-impl<'pio, P, SM, SDA, SCL, PinFunc> I2C<'pio, P, (P, SM), SDA, SCL, PinFunc>
+impl<'pio, P, SM, SDA, SCL> I2C<'pio, P, (P, SM), SDA, SCL>
 where
-    P: PIOExt,
+    P: PIOExt + FunctionConfig,
     SM: StateMachineIndex,
     SDA: PinId,
     SCL: PinId,
-    PinFunc: PinMode + ValidPinMode<SDA> + ValidPinMode<SCL>,
+    Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
 {
     /// Creates a new instance of this driver.
     ///
@@ -130,7 +130,10 @@ where
         sm: UninitStateMachine<(P, SM)>,
         bus_freq: embedded_time::rate::Hertz,
         clock_freq: embedded_time::rate::Hertz,
-    ) -> I2C<'pio, P, (P, SM), SDA, SCL, PinFunc> {
+    ) -> I2C<'pio, P, (P, SM), SDA, SCL>
+    where
+        Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
+    {
         // prepare the PIO program
         let mut a = pio::Assembler::<32>::new_with_side_set(SIDESET);
 
@@ -236,12 +239,12 @@ where
         ]);
 
         // attach SDA pin to pio
-        let mut sda: Pin<SDA, PinFunc> = sda.into_mode();
+        let mut sda: Pin<SDA, Function<P>> = sda.into_mode();
         // configure SDA pin as inverted
         sda.set_output_enable_override(rp2040_hal::gpio::OutputEnableOverride::Invert);
 
         // attach SCL pin to pio
-        let mut scl: Pin<SCL, PinFunc> = scl.into_mode();
+        let mut scl: Pin<SCL, Function<P>> = scl.into_mode();
         // configure SCL pin as inverted
         scl.set_output_enable_override(rp2040_hal::gpio::OutputEnableOverride::Invert);
 
@@ -271,13 +274,13 @@ where
     }
 }
 
-impl<P, SM, SDA, SCL, PinFunc> I2C<'_, P, SM, SDA, SCL, PinFunc>
+impl<P, SM, SDA, SCL> I2C<'_, P, SM, SDA, SCL>
 where
-    P: PIOExt,
+    P: PIOExt + FunctionConfig,
     SM: ValidStateMachine<PIO = P>,
     SDA: PinId,
     SCL: PinId,
-    PinFunc: PinMode + ValidPinMode<SDA> + ValidPinMode<SCL>,
+    Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
 {
     fn has_errored(&mut self) -> bool {
         let mask = 1 << SM::id();
@@ -425,14 +428,14 @@ where
     }
 }
 
-impl<A, P, SM, SDA, SCL, PinFunc> i2c::Read<A> for I2C<'_, P, SM, SDA, SCL, PinFunc>
+impl<A, P, SM, SDA, SCL> i2c::Read<A> for I2C<'_, P, SM, SDA, SCL>
 where
     A: AddressMode + Into<u16> + 'static,
-    P: PIOExt,
+    P: PIOExt + FunctionConfig,
     SM: ValidStateMachine<PIO = P>,
     SDA: PinId,
     SCL: PinId,
-    PinFunc: PinMode + ValidPinMode<SDA> + ValidPinMode<SCL>,
+    Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
 {
     type Error = Error;
 
@@ -443,14 +446,14 @@ where
     }
 }
 
-impl<A, P, SM, SDA, SCL, PinFunc> i2c::WriteIter<A> for I2C<'_, P, SM, SDA, SCL, PinFunc>
+impl<A, P, SM, SDA, SCL> i2c::WriteIter<A> for I2C<'_, P, SM, SDA, SCL>
 where
     A: Copy + AddressMode + Into<u16> + 'static,
-    P: PIOExt,
+    P: PIOExt + FunctionConfig,
     SM: ValidStateMachine<PIO = P>,
     SDA: PinId,
     SCL: PinId,
-    PinFunc: PinMode + ValidPinMode<SDA> + ValidPinMode<SCL>,
+    Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
 {
     type Error = Error;
 
@@ -463,14 +466,14 @@ where
         self.finish()
     }
 }
-impl<A, P, SM, SDA, SCL, PinFunc> i2c::Write<A> for I2C<'_, P, SM, SDA, SCL, PinFunc>
+impl<A, P, SM, SDA, SCL> i2c::Write<A> for I2C<'_, P, SM, SDA, SCL>
 where
     A: AddressMode + Copy + Into<u16> + 'static,
-    P: PIOExt,
+    P: PIOExt + FunctionConfig,
     SM: ValidStateMachine<PIO = P>,
     SDA: PinId,
     SCL: PinId,
-    PinFunc: PinMode + ValidPinMode<SDA> + ValidPinMode<SCL>,
+    Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
 {
     type Error = Error;
 
@@ -479,14 +482,14 @@ where
     }
 }
 
-impl<A, P, SM, SDA, SCL, PinFunc> i2c::WriteIterRead<A> for I2C<'_, P, SM, SDA, SCL, PinFunc>
+impl<A, P, SM, SDA, SCL> i2c::WriteIterRead<A> for I2C<'_, P, SM, SDA, SCL>
 where
     A: Copy + AddressMode + Into<u16> + 'static,
-    P: PIOExt,
+    P: PIOExt + FunctionConfig,
     SM: ValidStateMachine<PIO = P>,
     SDA: PinId,
     SCL: PinId,
-    PinFunc: PinMode + ValidPinMode<SDA> + ValidPinMode<SCL>,
+    Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
 {
     type Error = Error;
 
@@ -508,14 +511,14 @@ where
         self.finish()
     }
 }
-impl<A, P, SM, SDA, SCL, PinFunc> i2c::WriteRead<A> for I2C<'_, P, SM, SDA, SCL, PinFunc>
+impl<A, P, SM, SDA, SCL> i2c::WriteRead<A> for I2C<'_, P, SM, SDA, SCL>
 where
     A: Copy + AddressMode + Into<u16> + 'static,
-    P: PIOExt,
+    P: PIOExt + FunctionConfig,
     SM: ValidStateMachine<PIO = P>,
     SDA: PinId,
     SCL: PinId,
-    PinFunc: PinMode + ValidPinMode<SDA> + ValidPinMode<SCL>,
+    Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
 {
     type Error = Error;
 
@@ -534,14 +537,14 @@ where
     }
 }
 
-impl<A, P, SM, SDA, SCL, PinFunc> i2c::TransactionalIter<A> for I2C<'_, P, SM, SDA, SCL, PinFunc>
+impl<A, P, SM, SDA, SCL> i2c::TransactionalIter<A> for I2C<'_, P, SM, SDA, SCL>
 where
     A: Copy + AddressMode + Into<u16> + 'static,
-    P: PIOExt,
+    P: PIOExt + FunctionConfig,
     SM: ValidStateMachine<PIO = P>,
     SDA: PinId,
     SCL: PinId,
-    PinFunc: PinMode + ValidPinMode<SDA> + ValidPinMode<SCL>,
+    Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
 {
     type Error = Error;
 
@@ -570,14 +573,14 @@ where
     }
 }
 
-impl<A, P, SM, SDA, SCL, PinFunc> i2c::Transactional<A> for I2C<'_, P, SM, SDA, SCL, PinFunc>
+impl<A, P, SM, SDA, SCL> i2c::Transactional<A> for I2C<'_, P, SM, SDA, SCL>
 where
     A: Copy + AddressMode + Into<u16> + 'static,
-    P: PIOExt,
+    P: PIOExt + FunctionConfig,
     SM: ValidStateMachine<PIO = P>,
     SDA: PinId,
     SCL: PinId,
-    PinFunc: PinMode + ValidPinMode<SDA> + ValidPinMode<SCL>,
+    Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
 {
     type Error = Error;
 
