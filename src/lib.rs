@@ -48,7 +48,7 @@ use rp2040_hal::{
     gpio::{Disabled, DisabledConfig, Function, FunctionConfig, Pin, PinId, ValidPinMode},
     pio::{
         PIOExt, PinDir, PinState, Rx, ShiftDirection, StateMachine, StateMachineIndex, Tx,
-        UninitStateMachine, ValidStateMachine, PIO,
+        UninitStateMachine, PIO,
     },
 };
 
@@ -99,20 +99,20 @@ pub struct Error;
 pub struct I2C<'pio, P, SM, SDA, SCL>
 where
     P: PIOExt + FunctionConfig,
-    SM: ValidStateMachine<PIO = P>,
+    SM: StateMachineIndex,
     SDA: PinId,
     SCL: PinId,
     Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
 {
     pio: &'pio mut PIO<P>,
-    sm: StateMachine<SM, rp2040_hal::pio::Running>,
-    tx: Tx<SM>,
-    rx: Rx<SM>,
+    sm: StateMachine<(P, SM), rp2040_hal::pio::Running>,
+    tx: Tx<(P, SM)>,
+    rx: Rx<(P, SM)>,
     _sda: Pin<SDA, Function<P>>,
     _scl: Pin<SCL, Function<P>>,
 }
 
-impl<'pio, P, SM, SDA, SCL> I2C<'pio, P, (P, SM), SDA, SCL>
+impl<'pio, P, SM, SDA, SCL> I2C<'pio, P, SM, SDA, SCL>
 where
     P: PIOExt + FunctionConfig,
     SM: StateMachineIndex,
@@ -130,7 +130,7 @@ where
         sm: UninitStateMachine<(P, SM)>,
         bus_freq: embedded_time::rate::Hertz,
         clock_freq: embedded_time::rate::Hertz,
-    ) -> I2C<'pio, P, (P, SM), SDA, SCL>
+    ) -> I2C<'pio, P, SM, SDA, SCL>
     where
         Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
     {
@@ -277,7 +277,7 @@ where
 impl<P, SM, SDA, SCL> I2C<'_, P, SM, SDA, SCL>
 where
     P: PIOExt + FunctionConfig,
-    SM: ValidStateMachine<PIO = P>,
+    SM: StateMachineIndex,
     SDA: PinId,
     SCL: PinId,
     Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
@@ -432,7 +432,7 @@ impl<A, P, SM, SDA, SCL> i2c::Read<A> for I2C<'_, P, SM, SDA, SCL>
 where
     A: AddressMode + Into<u16> + 'static,
     P: PIOExt + FunctionConfig,
-    SM: ValidStateMachine<PIO = P>,
+    SM: StateMachineIndex,
     SDA: PinId,
     SCL: PinId,
     Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
@@ -450,7 +450,7 @@ impl<A, P, SM, SDA, SCL> i2c::WriteIter<A> for I2C<'_, P, SM, SDA, SCL>
 where
     A: Copy + AddressMode + Into<u16> + 'static,
     P: PIOExt + FunctionConfig,
-    SM: ValidStateMachine<PIO = P>,
+    SM: StateMachineIndex,
     SDA: PinId,
     SCL: PinId,
     Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
@@ -470,7 +470,7 @@ impl<A, P, SM, SDA, SCL> i2c::Write<A> for I2C<'_, P, SM, SDA, SCL>
 where
     A: AddressMode + Copy + Into<u16> + 'static,
     P: PIOExt + FunctionConfig,
-    SM: ValidStateMachine<PIO = P>,
+    SM: StateMachineIndex,
     SDA: PinId,
     SCL: PinId,
     Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
@@ -486,7 +486,7 @@ impl<A, P, SM, SDA, SCL> i2c::WriteIterRead<A> for I2C<'_, P, SM, SDA, SCL>
 where
     A: Copy + AddressMode + Into<u16> + 'static,
     P: PIOExt + FunctionConfig,
-    SM: ValidStateMachine<PIO = P>,
+    SM: StateMachineIndex,
     SDA: PinId,
     SCL: PinId,
     Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
@@ -515,7 +515,7 @@ impl<A, P, SM, SDA, SCL> i2c::WriteRead<A> for I2C<'_, P, SM, SDA, SCL>
 where
     A: Copy + AddressMode + Into<u16> + 'static,
     P: PIOExt + FunctionConfig,
-    SM: ValidStateMachine<PIO = P>,
+    SM: StateMachineIndex,
     SDA: PinId,
     SCL: PinId,
     Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
@@ -541,7 +541,7 @@ impl<A, P, SM, SDA, SCL> i2c::TransactionalIter<A> for I2C<'_, P, SM, SDA, SCL>
 where
     A: Copy + AddressMode + Into<u16> + 'static,
     P: PIOExt + FunctionConfig,
-    SM: ValidStateMachine<PIO = P>,
+    SM: StateMachineIndex,
     SDA: PinId,
     SCL: PinId,
     Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
@@ -577,7 +577,7 @@ impl<A, P, SM, SDA, SCL> i2c::Transactional<A> for I2C<'_, P, SM, SDA, SCL>
 where
     A: Copy + AddressMode + Into<u16> + 'static,
     P: PIOExt + FunctionConfig,
-    SM: ValidStateMachine<PIO = P>,
+    SM: StateMachineIndex,
     SDA: PinId,
     SCL: PinId,
     Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
@@ -619,7 +619,7 @@ mod eh1_0_alpha {
     where
         A: Copy + AddressMode + Into<u16> + 'static,
         P: PIOExt + FunctionConfig,
-        SM: ValidStateMachine<PIO = P>,
+        SM: StateMachineIndex,
         SDA: PinId,
         SCL: PinId,
         Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
