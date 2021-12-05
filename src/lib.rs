@@ -95,7 +95,7 @@ const DATA_OFFSET: usize = 1;
 #[derive(Debug)]
 pub struct Error;
 
-/// Instance of WS2812 LED chain.
+/// Instance of I2C Controller.
 pub struct I2C<'pio, P, SM, SDA, SCL>
 where
     P: PIOExt + FunctionConfig,
