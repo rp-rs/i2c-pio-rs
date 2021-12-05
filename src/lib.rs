@@ -252,7 +252,7 @@ where
         sm.set_pins([(SDA::DYN.num, PinState::Low), (SCL::DYN.num, PinState::Low)]);
 
         // Set the state machine on the entry point.
-        sm.set_instruction(
+        sm.exec_instruction(
             InstructionOperands::JMP {
                 condition: pio::JmpCondition::Always,
                 address: wrap_target,
