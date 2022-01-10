@@ -16,10 +16,4 @@ embedded-hal = "0.2.6"
 embedded-time = "0.12.0"
 nb = "1.0.0"
 pio = "0.1.0"
-rp2040-hal = "0.3.0"
-
-[patch.'https://github.com/rp-rs/pio-rs.git']
-pio = { path = "../pio-rs" }
-
-[patch.'https://github.com/rp-rs/rp-hal.git']
-rp2040-hal = { path = "../rp-hal/rp2040-hal" }
+rp2040-hal = "0.4.0"
