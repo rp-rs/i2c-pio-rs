@@ -163,7 +163,7 @@ where
         // SCL rising edge
         a.nop_with_delay_and_side_set(2, 1);
         // Allow clock to be stretched
-        a.wait_with_delay(1, pio::WaitSource::GPIO, SCL::DYN.num, 4);
+        a.wait_with_delay(1, pio::WaitSource::GPIO, SCL::DYN.num, false, 4);
         // Sample read data in middle of SCL pulse
         a.in_with_delay(pio::InSource::PINS, 1, 7);
         // SCL falling edge
@@ -175,7 +175,7 @@ where
         // SCL risin edge
         a.nop_with_delay_and_side_set(7, 1);
         // Allow clock to be stretched
-        a.wait_with_delay(1, pio::WaitSource::GPIO, SCL::DYN.num, 7);
+        a.wait_with_delay(1, pio::WaitSource::GPIO, SCL::DYN.num, false, 7);
         // Test SDA for ACK/NACK, fall through if ACK
         a.jmp_with_delay_and_side_set(pio::JmpCondition::PinHigh, &mut handle_nack, 2, 0);
 
