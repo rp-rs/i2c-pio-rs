@@ -288,7 +288,7 @@ where
     }
 
     fn put(&mut self, data: u16) {
-        while !self.tx.write(data) {}
+        while !self.tx.write_u16_replicated(data) {}
     }
 
     fn put_data(&mut self, data: u8, read_ack: bool, last: bool) {
@@ -297,7 +297,7 @@ where
         let data_field = u16::from(data) << DATA_OFFSET;
 
         let word = final_field | data_field | nak_field;
-        while !self.tx.write(word) {}
+        while !self.tx.write_u16_replicated(word) {}
     }
 
     fn put_instr_sequence<T, U>(&mut self, seq: T)
