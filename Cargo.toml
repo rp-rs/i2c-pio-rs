@@ -1,11 +1,11 @@
 [package]
 name = "i2c-pio"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2018"
 license = "Apache-2.0"
 description = "I2C driver implementation using the RP2040's PIO peripheral."
 documentation = "https://docs.rs/i2c-pio"
-repository = "https://github.com/ithinuel/i2c-pio-rs"
+repository = "https://github.com/rp-rs/i2c-pio-rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -16,4 +16,4 @@ embedded-hal = "0.2.6"
 embedded-time = "0.12.0"
 nb = "1.0.0"
 pio = "0.2.0"
-rp2040-hal = "0.4.0"
+rp2040-hal = "0.5.0"
