@@ -42,7 +42,7 @@
 //! with the side effect of the MOV on TX shift counter.)
 
 use embedded_hal::blocking::i2c::{self, AddressMode, Operation, TenBitAddress};
-use embedded_time::fixed_point::FixedPoint;
+use fugit::HertzU32;
 use pio::{Instruction, InstructionOperands, SideSet};
 use rp2040_hal::{
     gpio::{Disabled, DisabledConfig, Function, FunctionConfig, Pin, PinId, ValidPinMode},
@@ -128,8 +128,8 @@ where
         sda: rp2040_hal::gpio::Pin<SDA, Disabled<SdaDisabledConfig>>,
         scl: rp2040_hal::gpio::Pin<SCL, Disabled<SclDisabledConfig>>,
         sm: UninitStateMachine<(P, SM)>,
-        bus_freq: embedded_time::rate::Hertz,
-        clock_freq: embedded_time::rate::Hertz,
+        bus_freq: HertzU32,
+        clock_freq: HertzU32,
     ) -> I2C<'pio, P, (P, SM), SDA, SCL>
     where
         Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
@@ -200,7 +200,7 @@ where
         let wrap_target = installed.wrap_target();
 
         // Configure the PIO state machine.
-        let div = clock_freq.integer() as f32 / (32.0 * bus_freq.integer() as f32);
+        let div = clock_freq.to_Hz() as f32 / ((32 * bus_freq).to_Hz() as f32);
 
         // init
         let (mut sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_program(installed)
