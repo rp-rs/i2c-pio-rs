@@ -204,18 +204,19 @@ where
         let mut int = clock_freq / bit_freq;
         let rem = clock_freq - (int * bit_freq);
         let frac = (rem * 256) / bit_freq;
-        assert_ne!(
-            int, 0,
-            "The bus frequency times 32 must be lower or equal to the system clock."
+
+        assert!(
+            (1..=65536).contains(&int) && (int != 65536 || frac == 0),
+            "The ratio between the bus frequency and the system clock must be within [1.0, 65536.0]."
         );
 
-        if int == 65536 && frac == 0 {
+        // 65536.0 is represented as 0 in the pio's clock divider
+        if int == 65536 {
             int = 0;
         }
-        let int: u16 = int.try_into().expect(
-            "The bus frequency can only be at most 65536 times slower than the system clock.",
-        );
-        let frac: u8 = frac.try_into().unwrap();
+        // Using lossy conversion because range have been checked
+        let int: u16 = int as u16;
+        let frac: u8 = frac as u8;
 
         // init
         let (mut sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_program(installed)
