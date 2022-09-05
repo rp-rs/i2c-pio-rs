@@ -334,7 +334,10 @@ where
 
     fn wait_idle(&mut self) {
         self.tx.clear_stalled_flag();
-        while (!self.tx.has_stalled() || !self.tx.is_empty()) && !self.has_errored() {}
+        while (!self.tx.has_stalled() || !self.tx.is_empty()) && !self.has_errored() {
+            // discard rx fifo to a prevent RX stall
+            let _ = self.rx.read();
+        }
     }
 
     fn resume_after_error(&mut self) {
