@@ -41,14 +41,14 @@
 //! but costs 2 instructions: 1 for inversion, and one to cope
 //! with the side effect of the MOV on TX shift counter.)
 
-use embedded_hal::blocking::i2c::{self, AddressMode, Operation, TenBitAddress};
+use embedded_hal::blocking::i2c::{self, AddressMode, Operation, SevenBitAddress, TenBitAddress};
 use fugit::HertzU32;
 use pio::{Instruction, InstructionOperands, SideSet};
 use rp2040_hal::{
     gpio::{Disabled, DisabledConfig, Function, FunctionConfig, Pin, PinId, ValidPinMode},
     pio::{
         PIOExt, PinDir, PinState, Rx, ShiftDirection, StateMachine, StateMachineIndex, Tx,
-        UninitStateMachine, ValidStateMachine, PIO,
+        UninitStateMachine, PIO,
     },
 };
 
@@ -93,29 +93,33 @@ const INSTR_OFFSET: usize = 10;
 const DATA_OFFSET: usize = 1;
 
 #[derive(Debug)]
-pub struct Error;
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum Error {
+    NoAcknowledgeAddress,
+    NoAcknowledgeData,
+}
 
 /// Instance of I2C Controller.
-pub struct I2C<'pio, P, SM, SDA, SCL>
+pub struct I2C<'pio, P, SMI, SDA, SCL>
 where
     P: PIOExt + FunctionConfig,
-    SM: ValidStateMachine<PIO = P>,
+    SMI: StateMachineIndex,
     SDA: PinId,
     SCL: PinId,
     Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
 {
     pio: &'pio mut PIO<P>,
-    sm: StateMachine<SM, rp2040_hal::pio::Running>,
-    tx: Tx<SM>,
-    rx: Rx<SM>,
+    sm: StateMachine<(P, SMI), rp2040_hal::pio::Running>,
+    tx: Tx<(P, SMI)>,
+    rx: Rx<(P, SMI)>,
     _sda: Pin<SDA, Function<P>>,
     _scl: Pin<SCL, Function<P>>,
 }
 
-impl<'pio, P, SM, SDA, SCL> I2C<'pio, P, (P, SM), SDA, SCL>
+impl<'pio, P, SMI, SDA, SCL> I2C<'pio, P, SMI, SDA, SCL>
 where
     P: PIOExt + FunctionConfig,
-    SM: StateMachineIndex,
+    SMI: StateMachineIndex,
     SDA: PinId,
     SCL: PinId,
     Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
@@ -127,30 +131,32 @@ where
         pio: &'pio mut PIO<P>,
         sda: rp2040_hal::gpio::Pin<SDA, Disabled<SdaDisabledConfig>>,
         scl: rp2040_hal::gpio::Pin<SCL, Disabled<SclDisabledConfig>>,
-        sm: UninitStateMachine<(P, SM)>,
+        sm: UninitStateMachine<(P, SMI)>,
         bus_freq: HertzU32,
         clock_freq: HertzU32,
-    ) -> I2C<'pio, P, (P, SM), SDA, SCL>
+    ) -> Self
     where
         Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
     {
         // prepare the PIO program
         let mut a = pio::Assembler::<32>::new_with_side_set(SIDESET);
 
-        let mut handle_nack = a.label();
-        let mut send_byte = a.label();
+        let mut byte_send = a.label();
+        let mut byte_nack = a.label();
+        let mut byte_end = a.label();
         let mut bitloop = a.label();
         let mut wrap_target = a.label();
         let mut wrap_source = a.label();
         let mut do_exec = a.label();
 
-        a.bind(&mut &mut handle_nack);
+        a.bind(&mut byte_nack);
         // continue if NAK was expected
-        a.jmp(pio::JmpCondition::YDecNonZero, &mut wrap_target);
-        // Otherwise stop, ask for help (raises the irq line (0+SM::id())%4)
+        a.jmp(pio::JmpCondition::YDecNonZero, &mut byte_end);
+        // In nack was not expected, park on IRQ (0+SM:id())%4 until the software handles it.
         a.irq(false, true, 0, true);
+        a.jmp(pio::JmpCondition::Always, &mut byte_end);
 
-        a.bind(&mut send_byte);
+        a.bind(&mut byte_send);
         // Unpack Final
         a.out(pio::OutDestination::Y, 1);
         // loop 8 times
@@ -170,25 +176,31 @@ where
         a.jmp_with_delay_and_side_set(pio::JmpCondition::XDecNonZero, &mut bitloop, 7, 0);
 
         // handle ACK pulse
-        // On reads, we provide the ACK
+        // On reads, we provide the ACK, on writes, the pin is passively pulled up
         a.out_with_delay(pio::OutDestination::PINDIRS, 1, 7);
         // SCL risin edge
         a.nop_with_delay_and_side_set(7, 1);
         // Allow clock to be stretched
         a.wait_with_delay(1, pio::WaitSource::GPIO, SCL::DYN.num, false, 7);
         // Test SDA for ACK/NACK, fall through if ACK
-        a.jmp_with_delay_and_side_set(pio::JmpCondition::PinHigh, &mut handle_nack, 2, 0);
+        a.jmp_with_delay_and_side_set(pio::JmpCondition::PinHigh, &mut byte_nack, 2, 0);
+
+        a.bind(&mut byte_end);
+        // complete the operation by pushing the shift register to the fifo
+        a.push(false, true);
 
         a.bind(&mut wrap_target);
         // Unpack Instr count
         a.out(pio::OutDestination::X, 6);
         // Instr == 0, this is a data record
-        a.jmp(pio::JmpCondition::XIsZero, &mut send_byte);
+        a.jmp(pio::JmpCondition::XIsZero, &mut byte_send);
         // Instr > 0, remainder of this OSR is invalid
-        a.out(pio::OutDestination::NULL, 32);
+        a.out(pio::OutDestination::NULL, 10);
 
+        // special action sub function (Start/Restart/Stop sequences)
         a.bind(&mut do_exec);
         // Execute one instruction per FIFO word
+        a.pull(true, true);
         a.out(pio::OutDestination::EXEC, 16);
         a.jmp(pio::JmpCondition::XDecNonZero, &mut do_exec);
         a.bind(&mut wrap_source);
@@ -218,7 +230,6 @@ where
             .pull_threshold(16)
             // ISR config
             .in_shift_direction(ShiftDirection::Left)
-            .autopush(true)
             .push_threshold(8)
             // clock config
             .clock_divisor(div)
@@ -272,19 +283,18 @@ where
             _scl: scl,
         }
     }
-}
 
-impl<P, SM, SDA, SCL> I2C<'_, P, SM, SDA, SCL>
-where
-    P: PIOExt + FunctionConfig,
-    SM: ValidStateMachine<PIO = P>,
-    SDA: PinId,
-    SCL: PinId,
-    Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
-{
     fn has_errored(&mut self) -> bool {
-        let mask = 1 << SM::id();
+        let mask = 1 << SMI::id();
         self.pio.get_irq_raw() & mask != 0
+    }
+
+    fn resume_after_error(&mut self) {
+        self.tx.drain_fifo();
+        self.pio.clear_irq(1 << SMI::id());
+        while !self.sm.stalled() {
+            let _ = self.rx.read();
+        }
     }
 
     fn put(&mut self, data: u16) {
@@ -297,7 +307,7 @@ where
         let data_field = u16::from(data) << DATA_OFFSET;
 
         let word = final_field | data_field | nak_field;
-        while !self.tx.write_u16_replicated(word) {}
+        self.put(word);
     }
 
     fn put_instr_sequence<T, U>(&mut self, seq: T)
@@ -305,11 +315,6 @@ where
         T: IntoIterator<IntoIter = U>,
         U: Iterator<Item = Instruction> + ExactSizeIterator,
     {
-        assert!(
-            self.tx.has_stalled(),
-            "put_instr may only be called when the state machine is idle"
-        );
-
         let seq = seq.into_iter();
         assert!(seq.len() < 64);
         let n = seq.len() as u16;
@@ -325,6 +330,9 @@ where
     }
 
     fn stop(&mut self) {
+        if self.has_errored() {
+            self.resume_after_error();
+        }
         self.put_instr_sequence([SC0SD0, SC1SD0, SC1SD1])
     }
 
@@ -332,27 +340,15 @@ where
         self.put_instr_sequence([SC0SD1, SC1SD1, SC1SD0, SC0SD0])
     }
 
-    fn wait_idle(&mut self) {
-        self.tx.clear_stalled_flag();
-        while (!self.tx.has_stalled() || !self.tx.is_empty()) && !self.has_errored() {
-            // discard rx fifo to a prevent RX stall
-            let _ = self.rx.read();
-        }
-    }
-
-    fn resume_after_error(&mut self) {
-        // drain tx_fifo
-        self.tx.drain_fifo();
-        self.sm.restart();
-        self.pio.clear_irq(1 << SM::id());
-    }
-
-    fn setup<A>(&mut self, address: A, read: bool, do_restart: bool)
+    fn setup<A>(&mut self, address: A, read: bool, do_restart: bool) -> Result<(), Error>
     where
-        A: AddressMode + Into<u16> + 'static,
+        A: Copy + AddressMode + Into<u16> + 'static,
     {
         // TODO: validate addr
         let address: u16 = address.into();
+
+        // flush read fifo
+        assert!(self.rx.read().is_none(), "rx FIFO shall be empty");
 
         // send start condition
         if !do_restart {
@@ -361,81 +357,123 @@ where
             self.restart();
         }
 
-        // flush read fifo
-        assert!(self.rx.read().is_none(), "rx FIFO shall be empty");
-
         let read_flag = if read { 1 } else { 0 };
 
         // send address
-        if core::any::TypeId::of::<A>() == core::any::TypeId::of::<TenBitAddress>() {
-            let addr_hi = 0xF0 | ((address >> 7) & 0x6) | read_flag;
-            let addr_lo = address & 0xFF;
-
-            self.put_data(addr_hi as u8, true, false);
-            self.put_data(addr_lo as u8, true, false);
-        } else {
+        use core::any::TypeId;
+        let a_tid = TypeId::of::<A>();
+        let mut address_len: u32 = if TypeId::of::<SevenBitAddress>() == a_tid {
             let addr = (address << 1) | read_flag;
             self.put_data(addr as u8, true, false);
+            1
+        } else if TypeId::of::<TenBitAddress>() == a_tid {
+            let addr_hi = 0xF0 | ((address >> 7) & 0x6) | read_flag;
+            let addr_lo = address & 0xFF;
+            self.put_data(addr_hi as u8, true, false);
+            self.put_data(addr_lo as u8, true, false);
+            2
+        } else {
+            panic!("Unsupported address type.");
+        };
+
+        while !(self.has_errored() || address_len == 0) {
+            while address_len > 0 && self.rx.read().is_some() {
+                address_len -= 1;
+            }
+        }
+
+        if self.has_errored() {
+            Err(Error::NoAcknowledgeAddress)
+        } else {
+            Ok(())
         }
     }
 
-    fn read<A>(&mut self, buffer: &mut [u8]) {
-        let mut tx_remain = buffer.len();
-        let mut iter = buffer.iter_mut();
-        // It's kind of an abuse but it'll do for now
-        let mut ignore_cnt = core::mem::size_of::<A>();
+    fn read(&mut self, buffer: &mut [u8]) -> Result<(), Error> {
+        assert!(
+            !self.has_errored() && self.rx.is_empty(),
+            "Invalid state in entering read: has_errored:{} rx.is_empty:{}",
+            self.has_errored(),
+            self.rx.is_empty()
+        );
 
-        while iter.len() != 0 && !self.has_errored() {
-            if !self.tx.is_full() && tx_remain > 0 {
-                tx_remain -= 1;
-                let last = tx_remain == 0;
+        let mut queued = 0;
+        let mut iter = buffer.iter_mut();
+
+        // while there are still bytes to queue
+        while queued < iter.len() && !self.has_errored() {
+            if queued < iter.len() && !self.tx.is_full() {
+                queued += 1;
+                let last = queued == iter.len();
                 self.put_data(0xFF, last, last);
             }
-            if let Some(data) = self.rx.read() {
-                if ignore_cnt > 0 {
-                    ignore_cnt -= 1;
-                } else if let Some(byte) = iter.next() {
-                    *byte = (data & 0xFF) as u8;
+
+            if let Some(byte) = self.rx.read() {
+                queued -= 1;
+                if let Some(data) = iter.next() {
+                    *data = (byte & 0xFF) as u8;
                 }
             }
         }
+
+        // process the remaining transfers
+        while !(self.has_errored() || queued == 0) {
+            if let Some(byte) = self.rx.read() {
+                queued -= 1;
+                if let Some(data) = iter.next() {
+                    *data = (byte & 0xFF) as u8;
+                }
+            }
+        }
+
+        if self.has_errored() {
+            Err(Error::NoAcknowledgeData)
+        } else {
+            Ok(())
+        }
     }
 
-    fn write<B>(&mut self, buffer: B)
+    fn write<B>(&mut self, buffer: B) -> Result<(), Error>
     where
         B: IntoIterator<Item = u8>,
     {
+        assert!(
+            !self.has_errored() && self.rx.is_empty(),
+            "Invalid state in entering write: has_errored:{} rx.is_empty:{}",
+            self.has_errored(),
+            self.rx.is_empty()
+        );
+
+        let mut queued = 0;
         let mut iter = buffer.into_iter().peekable();
-        while let Some(byte) = iter.next() {
-            if self.has_errored() {
-                break;
+        while let (Some(byte), false) = (iter.next(), self.has_errored()) {
+            // ignore any received bytes
+            if self.rx.read().is_some() {
+                queued -= 1;
             }
             self.put_data(byte, true, iter.peek().is_none());
-            let _ = self.rx.read();
+            queued += 1;
         }
-        self.wait_idle();
-        // flush RX FIFO
-        while self.rx.read().is_some() {}
-    }
 
-    fn finish(&mut self) -> Result<(), Error> {
-        let res = if self.has_errored() {
-            self.resume_after_error();
-            self.wait_idle();
-            Err(Error)
+        while !(queued == 0 || self.has_errored()) {
+            if self.rx.read().is_some() {
+                queued -= 1;
+            }
+        }
+
+        if self.has_errored() {
+            Err(Error::NoAcknowledgeData)
         } else {
             Ok(())
-        };
-        self.stop();
-        res
+        }
     }
 }
 
-impl<A, P, SM, SDA, SCL> i2c::Read<A> for I2C<'_, P, SM, SDA, SCL>
+impl<A, P, SMI, SDA, SCL> i2c::Read<A> for I2C<'_, P, SMI, SDA, SCL>
 where
-    A: AddressMode + Into<u16> + 'static,
+    A: Copy + AddressMode + Into<u16> + 'static,
     P: PIOExt + FunctionConfig,
-    SM: ValidStateMachine<PIO = P>,
+    SMI: StateMachineIndex,
     SDA: PinId,
     SCL: PinId,
     Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
@@ -443,17 +481,20 @@ where
     type Error = Error;
 
     fn read(&mut self, address: A, buffer: &mut [u8]) -> Result<(), Self::Error> {
-        self.setup(address, true, false);
-        self.read::<A>(buffer);
-        self.finish()
+        let mut res = self.setup(address, true, false);
+        if res.is_ok() {
+            res = self.read(buffer);
+        }
+        self.stop();
+        res
     }
 }
 
-impl<A, P, SM, SDA, SCL> i2c::WriteIter<A> for I2C<'_, P, SM, SDA, SCL>
+impl<A, P, SMI, SDA, SCL> i2c::WriteIter<A> for I2C<'_, P, SMI, SDA, SCL>
 where
     A: Copy + AddressMode + Into<u16> + 'static,
     P: PIOExt + FunctionConfig,
-    SM: ValidStateMachine<PIO = P>,
+    SMI: StateMachineIndex,
     SDA: PinId,
     SCL: PinId,
     Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
@@ -464,16 +505,19 @@ where
     where
         B: IntoIterator<Item = u8>,
     {
-        self.setup(address, false, false);
-        self.write(bytes);
-        self.finish()
+        let mut res = self.setup(address, false, false);
+        if res.is_ok() {
+            res = self.write(bytes);
+        }
+        self.stop();
+        res
     }
 }
-impl<A, P, SM, SDA, SCL> i2c::Write<A> for I2C<'_, P, SM, SDA, SCL>
+impl<A, P, SMI, SDA, SCL> i2c::Write<A> for I2C<'_, P, SMI, SDA, SCL>
 where
-    A: AddressMode + Copy + Into<u16> + 'static,
+    A: Copy + AddressMode + Into<u16> + 'static,
     P: PIOExt + FunctionConfig,
-    SM: ValidStateMachine<PIO = P>,
+    SMI: StateMachineIndex,
     SDA: PinId,
     SCL: PinId,
     Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
@@ -485,11 +529,11 @@ where
     }
 }
 
-impl<A, P, SM, SDA, SCL> i2c::WriteIterRead<A> for I2C<'_, P, SM, SDA, SCL>
+impl<A, P, SMI, SDA, SCL> i2c::WriteIterRead<A> for I2C<'_, P, SMI, SDA, SCL>
 where
     A: Copy + AddressMode + Into<u16> + 'static,
     P: PIOExt + FunctionConfig,
-    SM: ValidStateMachine<PIO = P>,
+    SMI: StateMachineIndex,
     SDA: PinId,
     SCL: PinId,
     Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
@@ -505,20 +549,25 @@ where
     where
         B: IntoIterator<Item = u8>,
     {
-        self.setup(address, false, false);
-        self.write(bytes);
-        if !self.has_errored() {
-            self.setup(address, true, true);
-            self.read::<A>(buffer);
+        let mut res = self.setup(address, false, false);
+        if res.is_ok() {
+            res = self.write(bytes);
         }
-        self.finish()
+        if res.is_ok() {
+            res = self.setup(address, true, true);
+        }
+        if res.is_ok() {
+            res = self.read(buffer);
+        }
+        self.stop();
+        res
     }
 }
-impl<A, P, SM, SDA, SCL> i2c::WriteRead<A> for I2C<'_, P, SM, SDA, SCL>
+impl<A, P, SMI, SDA, SCL> i2c::WriteRead<A> for I2C<'_, P, SMI, SDA, SCL>
 where
     A: Copy + AddressMode + Into<u16> + 'static,
     P: PIOExt + FunctionConfig,
-    SM: ValidStateMachine<PIO = P>,
+    SMI: StateMachineIndex,
     SDA: PinId,
     SCL: PinId,
     Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
@@ -540,11 +589,11 @@ where
     }
 }
 
-impl<A, P, SM, SDA, SCL> i2c::TransactionalIter<A> for I2C<'_, P, SM, SDA, SCL>
+impl<A, P, SMI, SDA, SCL> i2c::TransactionalIter<A> for I2C<'_, P, SMI, SDA, SCL>
 where
     A: Copy + AddressMode + Into<u16> + 'static,
     P: PIOExt + FunctionConfig,
-    SM: ValidStateMachine<PIO = P>,
+    SMI: StateMachineIndex,
     SDA: PinId,
     SCL: PinId,
     Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
@@ -555,32 +604,38 @@ where
     where
         O: IntoIterator<Item = Operation<'a>>,
     {
+        let mut res = Ok(());
         let mut first = true;
         for op in operations {
             match op {
                 Operation::Read(buf) => {
-                    self.setup(address, true, !first);
-                    self.read::<A>(buf);
+                    res = self.setup(address, true, !first);
+                    if res.is_ok() {
+                        res = self.read(buf);
+                    }
                 }
                 Operation::Write(buf) => {
-                    self.setup(address, false, !first);
-                    self.write(buf.iter().cloned());
+                    res = self.setup(address, false, !first);
+                    if res.is_ok() {
+                        res = self.write(buf.iter().cloned());
+                    }
                 }
             };
-            first = false;
-            if self.has_errored() {
+            if res.is_err() {
                 break;
             }
+            first = false;
         }
-        self.finish()
+        self.stop();
+        res
     }
 }
 
-impl<A, P, SM, SDA, SCL> i2c::Transactional<A> for I2C<'_, P, SM, SDA, SCL>
+impl<A, P, SMI, SDA, SCL> i2c::Transactional<A> for I2C<'_, P, SMI, SDA, SCL>
 where
     A: Copy + AddressMode + Into<u16> + 'static,
     P: PIOExt + FunctionConfig,
-    SM: ValidStateMachine<PIO = P>,
+    SMI: StateMachineIndex,
     SDA: PinId,
     SCL: PinId,
     Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
@@ -592,24 +647,30 @@ where
         address: A,
         operations: &mut [Operation<'a>],
     ) -> Result<(), Self::Error> {
+        let mut res = Ok(());
         let mut first = true;
         for op in operations {
             match op {
                 Operation::Read(buf) => {
-                    self.setup(address, true, !first);
-                    self.read::<A>(buf);
+                    res = self.setup(address, true, !first);
+                    if res.is_ok() {
+                        res = self.read(buf);
+                    }
                 }
                 Operation::Write(buf) => {
-                    self.setup(address, false, !first);
-                    self.write(buf.iter().cloned());
+                    res = self.setup(address, false, !first);
+                    if res.is_ok() {
+                        res = self.write(buf.iter().cloned());
+                    }
                 }
             };
-            first = false;
-            if self.has_errored() {
+            if res.is_err() {
                 break;
             }
+            first = false;
         }
-        self.finish()
+        self.stop();
+        res
     }
 }
 
