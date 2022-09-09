@@ -342,7 +342,7 @@ where
 
     fn setup<A>(&mut self, address: A, read: bool, do_restart: bool) -> Result<(), Error>
     where
-        A: Copy + AddressMode + Into<u16> + 'static,
+        A: Into<u16> + 'static,
     {
         // TODO: validate addr
         let address: u16 = address.into();
@@ -471,7 +471,7 @@ where
 
 impl<A, P, SMI, SDA, SCL> i2c::Read<A> for I2C<'_, P, SMI, SDA, SCL>
 where
-    A: Copy + AddressMode + Into<u16> + 'static,
+    A: AddressMode + Into<u16> + 'static,
     P: PIOExt + FunctionConfig,
     SMI: StateMachineIndex,
     SDA: PinId,
@@ -492,7 +492,7 @@ where
 
 impl<A, P, SMI, SDA, SCL> i2c::WriteIter<A> for I2C<'_, P, SMI, SDA, SCL>
 where
-    A: Copy + AddressMode + Into<u16> + 'static,
+    A: AddressMode + Into<u16> + 'static,
     P: PIOExt + FunctionConfig,
     SMI: StateMachineIndex,
     SDA: PinId,
@@ -515,7 +515,7 @@ where
 }
 impl<A, P, SMI, SDA, SCL> i2c::Write<A> for I2C<'_, P, SMI, SDA, SCL>
 where
-    A: Copy + AddressMode + Into<u16> + 'static,
+    A: AddressMode + Into<u16> + 'static,
     P: PIOExt + FunctionConfig,
     SMI: StateMachineIndex,
     SDA: PinId,
@@ -531,7 +531,7 @@ where
 
 impl<A, P, SMI, SDA, SCL> i2c::WriteIterRead<A> for I2C<'_, P, SMI, SDA, SCL>
 where
-    A: Copy + AddressMode + Into<u16> + 'static,
+    A: AddressMode + Into<u16> + Clone + 'static,
     P: PIOExt + FunctionConfig,
     SMI: StateMachineIndex,
     SDA: PinId,
@@ -549,7 +549,7 @@ where
     where
         B: IntoIterator<Item = u8>,
     {
-        let mut res = self.setup(address, false, false);
+        let mut res = self.setup(address.clone(), false, false);
         if res.is_ok() {
             res = self.write(bytes);
         }
@@ -565,7 +565,7 @@ where
 }
 impl<A, P, SMI, SDA, SCL> i2c::WriteRead<A> for I2C<'_, P, SMI, SDA, SCL>
 where
-    A: Copy + AddressMode + Into<u16> + 'static,
+    A: AddressMode + Into<u16> + Clone + 'static,
     P: PIOExt + FunctionConfig,
     SMI: StateMachineIndex,
     SDA: PinId,
@@ -591,7 +591,7 @@ where
 
 impl<A, P, SMI, SDA, SCL> i2c::TransactionalIter<A> for I2C<'_, P, SMI, SDA, SCL>
 where
-    A: Copy + AddressMode + Into<u16> + 'static,
+    A: AddressMode + Into<u16> + Clone + 'static,
     P: PIOExt + FunctionConfig,
     SMI: StateMachineIndex,
     SDA: PinId,
@@ -609,13 +609,13 @@ where
         for op in operations {
             match op {
                 Operation::Read(buf) => {
-                    res = self.setup(address, true, !first);
+                    res = self.setup(address.clone(), true, !first);
                     if res.is_ok() {
                         res = self.read(buf);
                     }
                 }
                 Operation::Write(buf) => {
-                    res = self.setup(address, false, !first);
+                    res = self.setup(address.clone(), false, !first);
                     if res.is_ok() {
                         res = self.write(buf.iter().cloned());
                     }
@@ -633,7 +633,7 @@ where
 
 impl<A, P, SMI, SDA, SCL> i2c::Transactional<A> for I2C<'_, P, SMI, SDA, SCL>
 where
-    A: Copy + AddressMode + Into<u16> + 'static,
+    A: AddressMode + Into<u16> + Clone + 'static,
     P: PIOExt + FunctionConfig,
     SMI: StateMachineIndex,
     SDA: PinId,
@@ -652,13 +652,13 @@ where
         for op in operations {
             match op {
                 Operation::Read(buf) => {
-                    res = self.setup(address, true, !first);
+                    res = self.setup(address.clone(), true, !first);
                     if res.is_ok() {
                         res = self.read(buf);
                     }
                 }
                 Operation::Write(buf) => {
-                    res = self.setup(address, false, !first);
+                    res = self.setup(address.clone(), false, !first);
                     if res.is_ok() {
                         res = self.write(buf.iter().cloned());
                     }
@@ -676,36 +676,159 @@ where
 
 #[cfg(feature = "eh1_0_alpha")]
 mod eh1_0_alpha {
-    use super::Error;
-    use super::I2C;
+    use eh1_0_alpha::i2c::{blocking::Operation, AddressMode, ErrorKind, NoAcknowledgeSource};
 
-    impl<A, P, SM, SDA, SCL> eh1::Write for I2C<'_, P, SM, SDA, SCL>
+    use crate::Error;
+
+    use super::{Function, FunctionConfig, PIOExt, PinId, StateMachineIndex, ValidPinMode, I2C};
+
+    impl eh1_0_alpha::i2c::Error for super::Error {
+        fn kind(&self) -> ErrorKind {
+            match self {
+                Error::NoAcknowledgeAddress => {
+                    ErrorKind::NoAcknowledge(NoAcknowledgeSource::Address)
+                }
+                Error::NoAcknowledgeData => ErrorKind::NoAcknowledge(NoAcknowledgeSource::Data),
+            }
+        }
+    }
+
+    impl<P, SMI, SDA, SCL> eh1_0_alpha::i2c::ErrorType for I2C<'_, P, SMI, SDA, SCL>
     where
-        A: Copy + AddressMode + Into<u16> + 'static,
         P: PIOExt + FunctionConfig,
-        SM: ValidStateMachine<PIO = P>,
+        SMI: StateMachineIndex,
         SDA: PinId,
         SCL: PinId,
         Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
     {
-        type Error = Error;
-
-        fn write(&mut self, addr: u8, bytes: &[u8]) -> Result<(), Error> {
-            Write::write(self, addr, bytes)
-        }
+        type Error = super::Error;
     }
-    impl<T: Deref<Target = Block>, PINS> eh1::WriteRead for I2C<T, PINS, Controller> {
-        type Error = Error;
 
-        fn write_read(&mut self, addr: u8, bytes: &[u8], buffer: &mut [u8]) -> Result<(), Error> {
-            WriteRead::write_read(self, addr, bytes, buffer)
+    impl<A, P, SMI, SDA, SCL> eh1_0_alpha::i2c::blocking::I2c<A> for I2C<'_, P, SMI, SDA, SCL>
+    where
+        A: AddressMode + Into<u16> + Clone + 'static,
+        P: PIOExt + FunctionConfig,
+        SMI: StateMachineIndex,
+        SDA: PinId,
+        SCL: PinId,
+        Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
+    {
+        fn read(&mut self, address: A, buffer: &mut [u8]) -> Result<(), Self::Error> {
+            let mut res = self.setup(address, true, false);
+            if res.is_ok() {
+                res = self.read(buffer);
+            }
+            self.stop();
+            res
         }
-    }
-    impl<T: Deref<Target = Block>, PINS> eh1::Read for I2C<T, PINS, Controller> {
-        type Error = Error;
 
-        fn read(&mut self, addr: u8, buffer: &mut [u8]) -> Result<(), Error> {
-            Read::read(self, addr, buffer)
+        fn write(&mut self, address: A, bytes: &[u8]) -> Result<(), Self::Error> {
+            self.write_iter(address, bytes.into_iter().cloned())
+        }
+
+        fn write_iter<B>(&mut self, address: A, bytes: B) -> Result<(), Self::Error>
+        where
+            B: IntoIterator<Item = u8>,
+        {
+            let mut res = self.setup(address, false, false);
+            if res.is_ok() {
+                res = self.write(bytes);
+            }
+            self.stop();
+            res
+        }
+
+        fn write_read(
+            &mut self,
+            address: A,
+            bytes: &[u8],
+            buffer: &mut [u8],
+        ) -> Result<(), Self::Error> {
+            self.write_iter_read(address, bytes.into_iter().cloned(), buffer)
+        }
+
+        fn write_iter_read<B>(
+            &mut self,
+            address: A,
+            bytes: B,
+            buffer: &mut [u8],
+        ) -> Result<(), Self::Error>
+        where
+            B: IntoIterator<Item = u8>,
+        {
+            let mut res = self.setup(address.clone(), false, false);
+            if res.is_ok() {
+                res = self.write(bytes);
+            }
+            if res.is_ok() {
+                res = self.setup(address, true, true);
+            }
+            if res.is_ok() {
+                res = self.read(buffer);
+            }
+            self.stop();
+            res
+        }
+
+        fn transaction<'a>(
+            &mut self,
+            address: A,
+            operations: &mut [Operation<'a>],
+        ) -> Result<(), Self::Error> {
+            let mut res = Ok(());
+            let mut first = true;
+            for op in operations {
+                match op {
+                    Operation::Read(buf) => {
+                        res = self.setup(address.clone(), true, !first);
+                        if res.is_ok() {
+                            res = self.read(buf);
+                        }
+                    }
+                    Operation::Write(buf) => {
+                        res = self.setup(address.clone(), false, !first);
+                        if res.is_ok() {
+                            res = self.write(buf.iter().cloned());
+                        }
+                    }
+                };
+                if res.is_err() {
+                    break;
+                }
+                first = false;
+            }
+            self.stop();
+            res
+        }
+
+        fn transaction_iter<'a, O>(&mut self, address: A, operations: O) -> Result<(), Self::Error>
+        where
+            O: IntoIterator<Item = Operation<'a>>,
+        {
+            let mut res = Ok(());
+            let mut first = true;
+            for op in operations {
+                match op {
+                    Operation::Read(buf) => {
+                        res = self.setup(address.clone(), true, !first);
+                        if res.is_ok() {
+                            res = self.read(buf);
+                        }
+                    }
+                    Operation::Write(buf) => {
+                        res = self.setup(address.clone(), false, !first);
+                        if res.is_ok() {
+                            res = self.write(buf.iter().cloned());
+                        }
+                    }
+                };
+                if res.is_err() {
+                    break;
+                }
+                first = false;
+            }
+            self.stop();
+            res
         }
     }
 }
