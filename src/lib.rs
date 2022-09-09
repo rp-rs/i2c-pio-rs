@@ -401,23 +401,13 @@ where
         let mut iter = buffer.iter_mut();
 
         // while there are still bytes to queue
-        while queued < iter.len() && !self.has_errored() {
+        while iter.len() != 0 && !self.has_errored() {
             if queued < iter.len() && !self.tx.is_full() {
                 queued += 1;
                 let last = queued == iter.len();
                 self.put_data(0xFF, last, last);
             }
 
-            if let Some(byte) = self.rx.read() {
-                queued -= 1;
-                if let Some(data) = iter.next() {
-                    *data = (byte & 0xFF) as u8;
-                }
-            }
-        }
-
-        // process the remaining transfers
-        while !(self.has_errored() || queued == 0) {
             if let Some(byte) = self.rx.read() {
                 queued -= 1;
                 if let Some(data) = iter.next() {
