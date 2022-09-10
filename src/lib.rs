@@ -200,7 +200,23 @@ where
         let wrap_target = installed.wrap_target();
 
         // Configure the PIO state machine.
-        let div = clock_freq.to_Hz() as f32 / ((32 * bus_freq).to_Hz() as f32);
+        let bit_freq = 32 * bus_freq;
+        let mut int = clock_freq / bit_freq;
+        let rem = clock_freq - (int * bit_freq);
+        let frac = (rem * 256) / bit_freq;
+
+        assert!(
+            (1..=65536).contains(&int) && (int != 65536 || frac == 0),
+            "The ratio between the bus frequency and the system clock must be within [1.0, 65536.0]."
+        );
+
+        // 65536.0 is represented as 0 in the pio's clock divider
+        if int == 65536 {
+            int = 0;
+        }
+        // Using lossy conversion because range have been checked
+        let int: u16 = int as u16;
+        let frac: u8 = frac as u8;
 
         // init
         let (mut sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_program(installed)
@@ -221,7 +237,7 @@ where
             .autopush(true)
             .push_threshold(8)
             // clock config
-            .clock_divisor(div)
+            .clock_divisor_fixed_point(int, frac)
             .build(sm);
 
         // enable pull up on SDA & SCL: idle bus
