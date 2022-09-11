@@ -255,13 +255,14 @@ where
         sm.set_pins([(SDA::DYN.num, PinState::Low), (SCL::DYN.num, PinState::Low)]);
 
         // Set the state machine on the entry point.
-        sm.exec_instruction(
-            InstructionOperands::JMP {
+        sm.exec_instruction(Instruction {
+            operands: InstructionOperands::JMP {
                 condition: pio::JmpCondition::Always,
                 address: wrap_target,
-            }
-            .encode(),
-        );
+            },
+            delay: 0,
+            side_set: None,
+        });
 
         // enable
         let sm = sm.start();
@@ -282,7 +283,7 @@ where
     }
 
     fn resume_after_error(&mut self) {
-        self.tx.drain_fifo();
+        self.sm.drain_tx_fifo();
         self.pio.clear_irq(1 << SMI::id());
         while !self.sm.stalled() {
             let _ = self.rx.read();
