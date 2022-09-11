@@ -138,74 +138,69 @@ where
     where
         Function<P>: ValidPinMode<SDA> + ValidPinMode<SCL>,
     {
-        // prepare the PIO program
-        let mut a = pio::Assembler::<32>::new_with_side_set(SIDESET);
+        let mut program = pio_proc::pio_asm!(
+            ".side_set 1 opt pindirs"
 
-        let mut byte_send = a.label();
-        let mut byte_nack = a.label();
-        let mut byte_end = a.label();
-        let mut bitloop = a.label();
-        let mut wrap_target = a.label();
-        let mut wrap_source = a.label();
-        let mut do_exec = a.label();
+            "byte_nack:"
+            "  jmp  y--     byte_end"
+            "  irq  wait    0    rel"
+            "  jmp          byte_end"
 
-        a.bind(&mut byte_nack);
-        // continue if NAK was expected
-        a.jmp(pio::JmpCondition::YDecNonZero, &mut byte_end);
-        // In nack was not expected, park on IRQ (0+SM:id())%4 until the software handles it.
-        a.irq(false, true, 0, true);
-        a.jmp(pio::JmpCondition::Always, &mut byte_end);
+            "byte_send:"
+            "  out  y       1"
+            "  set  x       7"
 
-        a.bind(&mut byte_send);
-        // Unpack Final
-        a.out(pio::OutDestination::Y, 1);
-        // loop 8 times
-        a.set(pio::SetDestination::X, 7);
+            "bitloop:"
+            "  out  pindirs 1                [7]"
+            "  nop                    side 1 [2]"
+            //      polarity
+            "  wait 1       pin 1            [4]"
+            "  in   pins 1                   [7]"
+            "  jmp  x--     bitloop   side 0 [7]"
 
-        // Send 1 byte
-        a.bind(&mut bitloop);
-        // Serialize write data (all-ones is reading)
-        a.out_with_delay(pio::OutDestination::PINDIRS, 1, 7);
-        // SCL rising edge
-        a.nop_with_delay_and_side_set(2, 1);
-        // Allow clock to be stretched
-        a.wait_with_delay(1, pio::WaitSource::GPIO, SCL::DYN.num, false, 4);
-        // Sample read data in middle of SCL pulse
-        a.in_with_delay(pio::InSource::PINS, 1, 7);
-        // SCL falling edge
-        a.jmp_with_delay_and_side_set(pio::JmpCondition::XDecNonZero, &mut bitloop, 7, 0);
+            "  out  pindirs 1                [7]"
+            "  nop                    side 1 [7]"
+            //      polarity
+            "  wait 1       pin 1            [7]"
+            "  jmp  pin     byte_nack side 0 [2]"
 
-        // handle ACK pulse
-        // On reads, we provide the ACK, on writes, the pin is passively pulled up
-        a.out_with_delay(pio::OutDestination::PINDIRS, 1, 7);
-        // SCL risin edge
-        a.nop_with_delay_and_side_set(7, 1);
-        // Allow clock to be stretched
-        a.wait_with_delay(1, pio::WaitSource::GPIO, SCL::DYN.num, false, 7);
-        // Test SDA for ACK/NACK, fall through if ACK
-        a.jmp_with_delay_and_side_set(pio::JmpCondition::PinHigh, &mut byte_nack, 2, 0);
+            "byte_end:"
+            "  push block"
 
-        a.bind(&mut byte_end);
-        // complete the operation by pushing the shift register to the fifo
-        a.push(false, true);
+            ".wrap_target"
+            "  out  x       6"
+            "  jmp  !x      byte_send"
+            "  out  null    10"
 
-        a.bind(&mut wrap_target);
-        // Unpack Instr count
-        a.out(pio::OutDestination::X, 6);
-        // Instr == 0, this is a data record
-        a.jmp(pio::JmpCondition::XIsZero, &mut byte_send);
-        // Instr > 0, remainder of this OSR is invalid
-        a.out(pio::OutDestination::NULL, 10);
-
-        // special action sub function (Start/Restart/Stop sequences)
-        a.bind(&mut do_exec);
-        // Execute one instruction per FIFO word
-        a.pull(true, true);
-        a.out(pio::OutDestination::EXEC, 16);
-        a.jmp(pio::JmpCondition::XDecNonZero, &mut do_exec);
-        a.bind(&mut wrap_source);
-
-        let program = a.assemble_with_wrap(wrap_source, wrap_target);
+            "do_exec:"
+            "  out  exec    16"
+            "  jmp  x--     do_exec"
+            ".wrap"
+        )
+        .program;
+        // patch the program to allow scl to be any pin
+        program.code[7] = Instruction {
+            operands: InstructionOperands::WAIT {
+                polarity: 1,
+                source: pio::WaitSource::GPIO,
+                index: SCL::DYN.num,
+                relative: false,
+            },
+            delay: 4,
+            side_set: None,
+        }
+        .encode(SIDESET);
+        program.code[12] = Instruction {
+            operands: InstructionOperands::WAIT {
+                polarity: 1,
+                source: pio::WaitSource::GPIO,
+                index: SCL::DYN.num,
+                relative: false,
+            },
+            delay: 7,
+            side_set: None,
+        }
+        .encode(SIDESET);
 
         // Install the program into PIO instruction memory.
         let installed = pio.install(&program).unwrap();
