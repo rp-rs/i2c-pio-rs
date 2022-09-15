@@ -142,38 +142,39 @@ where
             ".side_set 1 opt pindirs"
 
             "byte_nack:"
-            "  jmp  y--     byte_end"
-            "  irq  wait    0    rel"
-            "  jmp          byte_end"
+            "  jmp  y--     byte_end  ; continue if NAK was expected"
+            "  irq  wait    0    rel  ; otherwise stop, ask for help (raises the irq line (0+SMI::id())%4)"
+            "  jmp          byte_end  ; resumed, finalize the current byte"
 
             "byte_send:"
-            "  out  y       1"
-            "  set  x       7"
+            "  out  y       1         ; Unpack FINAL"
+            "  set  x       7         ; loop 8 times"
 
             "bitloop:"
-            "  out  pindirs 1                [7]"
-            "  nop                    side 1 [2]"
+            "  out  pindirs 1                [7] ; Serialize write data (all-ones is reading)"
+            "  nop                    side 1 [2] ; SCL rising edge"
             //      polarity
-            "  wait 1       pin 1            [4]"
-            "  in   pins 1                   [7]"
-            "  jmp  x--     bitloop   side 0 [7]"
+            "  wait 1       gpio 0           [4] ; Allow clock to be stretched"
+            "  in   pins 1                   [7] ; Sample read data in middle of SCL pulse"
+            "  jmp  x--     bitloop   side 0 [7] ; SCL falling edge"
 
-            "  out  pindirs 1                [7]"
-            "  nop                    side 1 [7]"
+            // Handle ACK pulse
+            "  out  pindirs 1                [7] ; On reads, we provide the ACK"
+            "  nop                    side 1 [7] ; SCL rising edge"
             //      polarity
-            "  wait 1       pin 1            [7]"
-            "  jmp  pin     byte_nack side 0 [2]"
+            "  wait 1       gpio 0           [7] ; Allow clock to be stretched"
+            "  jmp  pin     byte_nack side 0 [2] ; Test SDA for ACK/NACK, fall through if ACK"
 
             "byte_end:"
-            "  push block"
+            "  push block             ; flush the current byte in isr to the FIFO"
 
             ".wrap_target"
-            "  out  x       6"
-            "  jmp  !x      byte_send"
-            "  out  null    10"
+            "  out  x       6         ; Unpack Instr count"
+            "  jmp  !x      byte_send ; Instr == 0, this is a data record"
+            "  out  null    10        ; Instr > 0, remainder of this OSR is invalid"
 
             "do_exec:"
-            "  out  exec    16"
+            "  out  exec    16        ; Execute one instruction per FIFO word"
             "  jmp  x--     do_exec"
             ".wrap"
         )
