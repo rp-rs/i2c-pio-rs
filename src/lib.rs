@@ -180,28 +180,8 @@ where
         )
         .program;
         // patch the program to allow scl to be any pin
-        program.code[7] = Instruction {
-            operands: InstructionOperands::WAIT {
-                polarity: 1,
-                source: pio::WaitSource::GPIO,
-                index: SCL::DYN.num,
-                relative: false,
-            },
-            delay: 4,
-            side_set: None,
-        }
-        .encode(SIDESET);
-        program.code[12] = Instruction {
-            operands: InstructionOperands::WAIT {
-                polarity: 1,
-                source: pio::WaitSource::GPIO,
-                index: SCL::DYN.num,
-                relative: false,
-            },
-            delay: 7,
-            side_set: None,
-        }
-        .encode(SIDESET);
+        program.code[7] |= u16::from(SCL::DYN.num);
+        program.code[12] |= u16::from(SCL::DYN.num);
 
         // Install the program into PIO instruction memory.
         let installed = pio.install(&program).unwrap();
