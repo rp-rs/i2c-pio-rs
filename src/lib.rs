@@ -659,7 +659,7 @@ where
 
 #[cfg(feature = "eh1_0_alpha")]
 mod eh1_0_alpha {
-    use eh1_0_alpha::i2c::{blocking::Operation, AddressMode, ErrorKind, NoAcknowledgeSource};
+    use eh1_0_alpha::i2c::{AddressMode, ErrorKind, NoAcknowledgeSource, Operation};
 
     use crate::Error;
 
@@ -687,7 +687,7 @@ mod eh1_0_alpha {
         type Error = super::Error;
     }
 
-    impl<A, P, SMI, SDA, SCL> eh1_0_alpha::i2c::blocking::I2c<A> for I2C<'_, P, SMI, SDA, SCL>
+    impl<A, P, SMI, SDA, SCL> eh1_0_alpha::i2c::I2c<A> for I2C<'_, P, SMI, SDA, SCL>
     where
         A: AddressMode + Into<u16> + Clone + 'static,
         P: PIOExt + FunctionConfig,
