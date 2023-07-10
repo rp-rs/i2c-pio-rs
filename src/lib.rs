@@ -134,12 +134,12 @@ where
         clock_freq: HertzU32,
     ) -> Self
     where
-    SDA: AnyPin<Function = FunctionNull>,
-    SDA::Id: ValidFunction<P::PinFunction>,
-    SCL: AnyPin<Function = FunctionNull>,
-    SCL::Id: ValidFunction<P::PinFunction>
+        SDA: AnyPin<Function = FunctionNull>,
+        SDA::Id: ValidFunction<P::PinFunction>,
+        SCL: AnyPin<Function = FunctionNull>,
+        SCL::Id: ValidFunction<P::PinFunction>,
     {
-        let (sda, scl): (SDA::Type, SCL::Type)  = (sda.into(), scl.into());
+        let (sda, scl): (SDA::Type, SCL::Type) = (sda.into(), scl.into());
 
         let mut program = pio_proc::pio_asm!(
             ".side_set 1 opt pindirs"
@@ -655,7 +655,83 @@ mod eh1_0_alpha {
 
     use crate::Error;
 
-    use super::{Function, FunctionConfig, PIOExt, PinId, StateMachineIndex, ValidPinMode, I2C};
+    use super::{AnyPin, PIOExt, StateMachineIndex, I2C};
+
+    impl<P, SMI, SDA, SCL> I2C<'_, P, SMI, SDA, SCL>
+    where
+        P: PIOExt,
+        SMI: StateMachineIndex,
+        SDA: AnyPin,
+        SCL: AnyPin,
+    {
+        pub fn write_iter<B, A>(&mut self, address: A, bytes: B) -> Result<(), Error>
+        where
+            A: AddressMode + Into<u16> + Clone + 'static,
+            B: IntoIterator<Item = u8>,
+        {
+            let mut res = self.setup(address, false, false);
+            if res.is_ok() {
+                res = self.write(bytes);
+            }
+            self.stop();
+            res
+        }
+
+        pub fn write_iter_read<A, B>(
+            &mut self,
+            address: A,
+            bytes: B,
+            buffer: &mut [u8],
+        ) -> Result<(), Error>
+        where
+            A: AddressMode + Into<u16> + Clone + 'static,
+            B: IntoIterator<Item = u8>,
+        {
+            let mut res = self.setup(address.clone(), false, false);
+            if res.is_ok() {
+                res = self.write(bytes);
+            }
+            if res.is_ok() {
+                res = self.setup(address, true, true);
+            }
+            if res.is_ok() {
+                res = self.read(buffer);
+            }
+            self.stop();
+            res
+        }
+
+        pub fn transaction_iter<'a, A, O>(&mut self, address: A, operations: O) -> Result<(), Error>
+        where
+            A: AddressMode + Into<u16> + Clone + 'static,
+            O: IntoIterator<Item = Operation<'a>>,
+        {
+            let mut res = Ok(());
+            let mut first = true;
+            for op in operations {
+                match op {
+                    Operation::Read(buf) => {
+                        res = self.setup(address.clone(), true, !first);
+                        if res.is_ok() {
+                            res = self.read(buf);
+                        }
+                    }
+                    Operation::Write(buf) => {
+                        res = self.setup(address.clone(), false, !first);
+                        if res.is_ok() {
+                            res = self.write(buf.iter().cloned());
+                        }
+                    }
+                };
+                if res.is_err() {
+                    break;
+                }
+                first = false;
+            }
+            self.stop();
+            res
+        }
+    }
 
     impl eh1_0_alpha::i2c::Error for super::Error {
         fn kind(&self) -> ErrorKind {
@@ -699,18 +775,6 @@ mod eh1_0_alpha {
             self.write_iter(address, bytes.into_iter().cloned())
         }
 
-        fn write_iter<B>(&mut self, address: A, bytes: B) -> Result<(), Self::Error>
-        where
-            B: IntoIterator<Item = u8>,
-        {
-            let mut res = self.setup(address, false, false);
-            if res.is_ok() {
-                res = self.write(bytes);
-            }
-            self.stop();
-            res
-        }
-
         fn write_read(
             &mut self,
             address: A,
@@ -720,64 +784,11 @@ mod eh1_0_alpha {
             self.write_iter_read(address, bytes.into_iter().cloned(), buffer)
         }
 
-        fn write_iter_read<B>(
-            &mut self,
-            address: A,
-            bytes: B,
-            buffer: &mut [u8],
-        ) -> Result<(), Self::Error>
-        where
-            B: IntoIterator<Item = u8>,
-        {
-            let mut res = self.setup(address.clone(), false, false);
-            if res.is_ok() {
-                res = self.write(bytes);
-            }
-            if res.is_ok() {
-                res = self.setup(address, true, true);
-            }
-            if res.is_ok() {
-                res = self.read(buffer);
-            }
-            self.stop();
-            res
-        }
-
         fn transaction<'a>(
             &mut self,
             address: A,
             operations: &mut [Operation<'a>],
         ) -> Result<(), Self::Error> {
-            let mut res = Ok(());
-            let mut first = true;
-            for op in operations {
-                match op {
-                    Operation::Read(buf) => {
-                        res = self.setup(address.clone(), true, !first);
-                        if res.is_ok() {
-                            res = self.read(buf);
-                        }
-                    }
-                    Operation::Write(buf) => {
-                        res = self.setup(address.clone(), false, !first);
-                        if res.is_ok() {
-                            res = self.write(buf.iter().cloned());
-                        }
-                    }
-                };
-                if res.is_err() {
-                    break;
-                }
-                first = false;
-            }
-            self.stop();
-            res
-        }
-
-        fn transaction_iter<'a, O>(&mut self, address: A, operations: O) -> Result<(), Self::Error>
-        where
-            O: IntoIterator<Item = Operation<'a>>,
-        {
             let mut res = Ok(());
             let mut first = true;
             for op in operations {
