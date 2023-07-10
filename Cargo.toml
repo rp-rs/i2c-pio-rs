@@ -11,12 +11,12 @@ repository = "https://github.com/rp-rs/i2c-pio-rs"
 
 [dependencies]
 cortex-m = "0.7.3"
-eh1_0_alpha = { version = "=1.0.0-alpha.9", package = "embedded-hal", optional = true }
+eh1_0_alpha = { version = "=1.0.0-alpha.11", package = "embedded-hal", optional = true }
 embedded-hal = "0.2.6"
 nb = "1.0.0"
 pio = "0.2.0"
 pio-proc = "0.2.0"
-rp2040-hal = "0.9.0"
+rp2040-hal = "0.9.0-alpha.1"
 fugit = "0.3.5"
 defmt = { version = "0.3.0", optional = true }
 
