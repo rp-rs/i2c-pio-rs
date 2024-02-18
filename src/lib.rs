@@ -40,63 +40,108 @@
 //! (It's possible for the inversion to be done in this program,
 //! but costs 2 instructions: 1 for inversion, and one to cope
 //! with the side effect of the MOV on TX shift counter.)
+use core::iter::once;
 
-use embedded_hal::blocking::i2c::{self, AddressMode, Operation, SevenBitAddress, TenBitAddress};
+use either::Either::{Left, Right};
 use fugit::HertzU32;
-use pio::{Instruction, InstructionOperands, SideSet};
+use heapless::Deque;
+use i2c_cmd::{restart, start, CmdWord, Data};
 use rp2040_hal::{
-    gpio::{AnyPin, FunctionNull, Pin, PullUp, ValidFunction},
+    gpio::{
+        AnyPin, Function, FunctionNull, OutputEnableOverride, Pin, PinId, PullType, PullUp,
+        ValidFunction,
+    },
     pio::{
         PIOExt, PinDir, PinState, Rx, ShiftDirection, StateMachine, StateMachineIndex, Tx,
         UninitStateMachine, PIO,
     },
 };
 
-const SC0SD0: Instruction = Instruction {
-    operands: pio::InstructionOperands::SET {
-        destination: pio::SetDestination::PINDIRS,
-        data: 0,
-    },
-    delay: 7,
-    side_set: Some(0),
-};
-const SC0SD1: Instruction = Instruction {
-    operands: pio::InstructionOperands::SET {
-        destination: pio::SetDestination::PINDIRS,
-        data: 1,
-    },
-    delay: 7,
-    side_set: Some(0),
-};
-const SC1SD0: Instruction = Instruction {
-    operands: pio::InstructionOperands::SET {
-        destination: pio::SetDestination::PINDIRS,
-        data: 0,
-    },
-    delay: 7,
-    side_set: Some(1),
-};
-const SC1SD1: Instruction = Instruction {
-    operands: pio::InstructionOperands::SET {
-        destination: pio::SetDestination::PINDIRS,
-        data: 1,
-    },
-    delay: 7,
-    side_set: Some(1),
-};
+use crate::i2c_cmd::stop;
 
-const SIDESET: SideSet = SideSet::new(true, 1, true);
+mod eh0_2;
+mod eh1_0;
+mod i2c_cmd;
 
-const NAK_BIT: u16 = 0b0000_0000_0000_0001;
-const FINAL_BIT: u16 = 0b0000_0010_0000_0000;
-const INSTR_OFFSET: usize = 10;
-const DATA_OFFSET: usize = 1;
+/// Length of an address.
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum AddressLength {
+    _7,
+    _10,
+}
+pub trait ValidAddressMode:
+    Copy + Into<u16> + embedded_hal::i2c::AddressMode + embedded_hal_0_2::blocking::i2c::AddressMode
+{
+    fn address_len() -> AddressLength;
+}
+macro_rules! impl_valid_addr {
+    ($t:path => $e:expr) => {
+        impl ValidAddressMode for $t {
+            fn address_len() -> AddressLength {
+                $e
+            }
+        }
+    };
+}
+impl_valid_addr!(u8 => AddressLength::_7);
+impl_valid_addr!(u16 => AddressLength::_10);
+// `embedded_hal`s’ SevenBitAddress and TenBitAddress are aliases to u8 and u16 respectively.
+//impl_valid_addr!(embedded_hal::i2c::SevenBitAddress => AddressLength::_7);
+//impl_valid_addr!(embedded_hal::i2c::TenBitAddress => AddressLength::_10);
+//impl_valid_addr!(embedded_hal_0_2::blocking::i2c::SevenBitAddress => AddressLength::_7);
+//impl_valid_addr!(embedded_hal_0_2::blocking::i2c::TenBitAddress => AddressLength::_10);
+
+fn setup<'b, A: ValidAddressMode>(
+    address: A,
+    read: bool,
+    do_restart: bool,
+) -> impl Iterator<Item = CmdWord<'b>> {
+    let read_flag = if read { 1 } else { 0 };
+    let address: u16 = address.into();
+    let address = match A::address_len() {
+        AddressLength::_7 => {
+            let address_and_flag = ((address as u8) << 1) | read_flag;
+            Left([address_and_flag].into_iter().map(CmdWord::address))
+        }
+        AddressLength::_10 => {
+            let addr_hi = 0xF0 | ((address >> 7) as u8) & 0xFE;
+            let addr_lo = (address & 0xFF) as u8;
+
+            Right(if read {
+                let full_addr = [addr_hi, addr_lo]
+                    .into_iter()
+                    .map(Data::address)
+                    .map(CmdWord::Data);
+                let read_addr =
+                    restart().chain(once(CmdWord::Data(Data::address(addr_hi | read_flag))));
+
+                Left(full_addr.chain(read_addr))
+            } else {
+                Right(
+                    [addr_hi | read_flag, addr_lo]
+                        .into_iter()
+                        .map(Data::address)
+                        .map(CmdWord::Data),
+                )
+            })
+        }
+    };
+
+    if do_restart {
+        Left(restart())
+    } else {
+        Right(start())
+    }
+    .chain(address)
+}
 
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Error {
     NoAcknowledgeAddress,
     NoAcknowledgeData,
+    BusContention,
 }
 
 /// Instance of I2C Controller.
@@ -111,8 +156,8 @@ where
     sm: StateMachine<(P, SMI), rp2040_hal::pio::Running>,
     tx: Tx<(P, SMI)>,
     rx: Rx<(P, SMI)>,
-    _sda: Pin<SDA::Id, P::PinFunction, PullUp>,
-    _scl: Pin<SCL::Id, P::PinFunction, PullUp>,
+    sda: (Pin<SDA::Id, P::PinFunction, PullUp>, OutputEnableOverride),
+    scl: (Pin<SCL::Id, P::PinFunction, PullUp>, OutputEnableOverride),
 }
 
 impl<'pio, P, SMI, SDA, SCL> I2C<'pio, P, SMI, SDA, SCL>
@@ -210,7 +255,7 @@ where
         let frac: u8 = frac as u8;
 
         // init
-        let (mut sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_program(installed)
+        let (mut sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_installed_program(installed)
             // use both RX & TX FIFO
             .buffers(rp2040_hal::pio::Buffers::RxTx)
             // Pin configuration
@@ -231,8 +276,10 @@ where
             .build(sm);
 
         // enable pull up on SDA & SCL: idle bus
-        let sda = sda.into_pull_type();
-        let scl = scl.into_pull_type();
+        let sda: Pin<_, _, PullUp> = sda.into_pull_type();
+        let scl: Pin<_, _, PullUp> = scl.into_pull_type();
+        let sda_override = sda.get_output_enable_override();
+        let scl_override = scl.get_output_enable_override();
 
         // This will pull the bus high for a little bit of time
         sm.set_pins([
@@ -247,19 +294,19 @@ where
         // attach SDA pin to pio
         let mut sda: Pin<SDA::Id, P::PinFunction, PullUp> = sda.into_function();
         // configure SDA pin as inverted
-        sda.set_output_enable_override(rp2040_hal::gpio::OutputEnableOverride::Invert);
+        sda.set_output_enable_override(OutputEnableOverride::Invert);
 
         // attach SCL pin to pio
         let mut scl: Pin<SCL::Id, P::PinFunction, PullUp> = scl.into_function();
         // configure SCL pin as inverted
-        scl.set_output_enable_override(rp2040_hal::gpio::OutputEnableOverride::Invert);
+        scl.set_output_enable_override(OutputEnableOverride::Invert);
 
         // the PIO now keeps the pin as Input, we can set the pin state to Low.
         sm.set_pins([(sda.id().num, PinState::Low), (scl.id().num, PinState::Low)]);
 
         // Set the state machine on the entry point.
-        sm.exec_instruction(Instruction {
-            operands: InstructionOperands::JMP {
+        sm.exec_instruction(pio::Instruction {
+            operands: pio::InstructionOperands::JMP {
                 condition: pio::JmpCondition::Always,
                 address: wrap_target,
             },
@@ -275,8 +322,8 @@ where
             sm,
             tx,
             rx,
-            _sda: sda.into(),
-            _scl: scl.into(),
+            sda: (sda, sda_override),
+            scl: (scl, scl_override),
         }
     }
 
@@ -285,534 +332,136 @@ where
         self.pio.get_irq_raw() & mask != 0
     }
 
-    fn resume_after_error(&mut self) {
-        self.sm.drain_tx_fifo();
+    fn err_with(&mut self, err: Error) -> Result<(), Error> {
+        // clear fifos
+        self.sm.clear_fifos();
+        // resume pio driver
         self.pio.clear_irq(1 << SMI::id());
-        while !self.sm.stalled() {
-            let _ = self.rx.read();
-        }
+        // generate stop condition
+        self.generate_stop();
+        Err(err)
     }
 
-    fn put(&mut self, data: u16) {
-        while !self.tx.write_u16_replicated(data) {}
+    fn generate_stop(&mut self) {
+        // this driver checks for acknoledge error and/or expects data back, so by the time a stop
+        // is generated, the tx fifo should be empty.
+        assert!(self.tx.is_empty(), "TX FIFO is empty");
+        for encoded in stop() {
+            self.tx.write_u16_replicated(encoded);
+        }
+        self.tx.clear_stalled_flag();
+        while !self.tx.has_stalled() {}
     }
 
-    fn put_data(&mut self, data: u8, read_ack: bool, last: bool) {
-        let final_field = if last { FINAL_BIT } else { 0 };
-        let nak_field = if read_ack { NAK_BIT } else { 0 };
-        let data_field = u16::from(data) << DATA_OFFSET;
-
-        let word = final_field | data_field | nak_field;
-        self.put(word);
-    }
-
-    fn put_instr_sequence<T, U>(&mut self, seq: T)
-    where
-        T: IntoIterator<IntoIter = U>,
-        U: Iterator<Item = Instruction> + ExactSizeIterator,
-    {
-        let seq = seq.into_iter();
-        assert!(seq.len() < 64);
-        let n = seq.len() as u16;
-
-        self.put((n - 1) << INSTR_OFFSET);
-        for instr in seq {
-            self.put(instr.encode(SIDESET));
-        }
-    }
-
-    fn start(&mut self) {
-        self.put_instr_sequence([SC1SD0, SC0SD0])
-    }
-
-    fn stop(&mut self) {
-        if self.has_errored() {
-            self.resume_after_error();
-        }
-        self.put_instr_sequence([SC0SD0, SC1SD0, SC1SD1])
-    }
-
-    fn restart(&mut self) {
-        self.put_instr_sequence([SC0SD1, SC1SD1, SC1SD0, SC0SD0])
-    }
-
-    fn setup<A>(&mut self, address: A, read: bool, do_restart: bool) -> Result<(), Error>
-    where
-        A: Into<u16> + 'static,
-    {
-        // TODO: validate addr
-        let address: u16 = address.into();
-
-        // flush read fifo
-        assert!(self.rx.read().is_none(), "rx FIFO shall be empty");
-
-        // send start condition
-        if !do_restart {
-            self.start();
-        } else {
-            self.restart();
-        }
-
-        let read_flag = if read { 1 } else { 0 };
-
-        // send address
-        use core::any::TypeId;
-        let a_tid = TypeId::of::<A>();
-        let mut address_len: u32 = if TypeId::of::<SevenBitAddress>() == a_tid {
-            let addr = (address << 1) | read_flag;
-            self.put_data(addr as u8, true, false);
-            1
-        } else if TypeId::of::<TenBitAddress>() == a_tid {
-            let addr_hi = 0xF0 | ((address >> 7) & 0x6) | read_flag;
-            let addr_lo = address & 0xFF;
-            self.put_data(addr_hi as u8, true, false);
-            self.put_data(addr_lo as u8, true, false);
-            2
-        } else {
-            panic!("Unsupported address type.");
-        };
-
-        while !(self.has_errored() || address_len == 0) {
-            while address_len > 0 && self.rx.read().is_some() {
-                address_len -= 1;
-            }
-        }
-
-        if self.has_errored() {
-            Err(Error::NoAcknowledgeAddress)
-        } else {
-            Ok(())
-        }
-    }
-
-    fn read(&mut self, buffer: &mut [u8]) -> Result<(), Error> {
-        assert!(
-            !self.has_errored() && self.rx.is_empty(),
-            "Invalid state in entering read: has_errored:{} rx.is_empty:{}",
-            self.has_errored(),
-            self.rx.is_empty()
-        );
-
-        let mut queued = 0;
-        let mut iter = buffer.iter_mut();
-
-        // while there are still bytes to queue
-        while iter.len() != 0 && !self.has_errored() {
-            if queued < iter.len() && !self.tx.is_full() {
-                queued += 1;
-                let last = queued == iter.len();
-                self.put_data(0xFF, last, last);
-            }
-
-            if let Some(byte) = self.rx.read() {
-                queued -= 1;
-                if let Some(data) = iter.next() {
-                    *data = (byte & 0xFF) as u8;
-                }
-            }
-        }
-
-        if self.has_errored() {
-            Err(Error::NoAcknowledgeData)
-        } else {
-            Ok(())
-        }
-    }
-
-    fn write<B>(&mut self, buffer: B) -> Result<(), Error>
-    where
-        B: IntoIterator<Item = u8>,
-    {
-        assert!(
-            !self.has_errored() && self.rx.is_empty(),
-            "Invalid state in entering write: has_errored:{} rx.is_empty:{}",
-            self.has_errored(),
-            self.rx.is_empty()
-        );
-
-        let mut queued = 0;
-        let mut iter = buffer.into_iter().peekable();
-        while let (Some(byte), false) = (iter.next(), self.has_errored()) {
-            // ignore any received bytes
-            if self.rx.read().is_some() {
-                queued -= 1;
-            }
-            self.put_data(byte, true, iter.peek().is_none());
-            queued += 1;
-        }
-
-        while !(queued == 0 || self.has_errored()) {
-            if self.rx.read().is_some() {
-                queued -= 1;
-            }
-        }
-
-        if self.has_errored() {
-            Err(Error::NoAcknowledgeData)
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl<A, P, SMI, SDA, SCL> i2c::Read<A> for I2C<'_, P, SMI, SDA, SCL>
-where
-    A: AddressMode + Into<u16> + 'static,
-    P: PIOExt,
-    SMI: StateMachineIndex,
-    SDA: AnyPin,
-    SCL: AnyPin,
-{
-    type Error = Error;
-
-    fn read(&mut self, address: A, buffer: &mut [u8]) -> Result<(), Self::Error> {
-        let mut res = self.setup(address, true, false);
-        if res.is_ok() {
-            res = self.read(buffer);
-        }
-        self.stop();
-        res
-    }
-}
-
-impl<A, P, SMI, SDA, SCL> i2c::WriteIter<A> for I2C<'_, P, SMI, SDA, SCL>
-where
-    A: AddressMode + Into<u16> + 'static,
-    P: PIOExt,
-    SMI: StateMachineIndex,
-    SDA: AnyPin,
-    SCL: AnyPin,
-{
-    type Error = Error;
-
-    fn write<B>(&mut self, address: A, bytes: B) -> Result<(), Self::Error>
-    where
-        B: IntoIterator<Item = u8>,
-    {
-        let mut res = self.setup(address, false, false);
-        if res.is_ok() {
-            res = self.write(bytes);
-        }
-        self.stop();
-        res
-    }
-}
-impl<A, P, SMI, SDA, SCL> i2c::Write<A> for I2C<'_, P, SMI, SDA, SCL>
-where
-    A: AddressMode + Into<u16> + 'static,
-    P: PIOExt,
-    SMI: StateMachineIndex,
-    SDA: AnyPin,
-    SCL: AnyPin,
-{
-    type Error = Error;
-
-    fn write(&mut self, address: A, buffer: &[u8]) -> Result<(), Self::Error> {
-        <Self as i2c::WriteIter<A>>::write(self, address, buffer.iter().cloned())
-    }
-}
-
-impl<A, P, SMI, SDA, SCL> i2c::WriteIterRead<A> for I2C<'_, P, SMI, SDA, SCL>
-where
-    A: AddressMode + Into<u16> + Clone + 'static,
-    P: PIOExt,
-    SMI: StateMachineIndex,
-    SDA: AnyPin,
-    SCL: AnyPin,
-{
-    type Error = Error;
-
-    fn write_iter_read<B>(
+    fn process_queue<'b>(
         &mut self,
-        address: A,
-        bytes: B,
-        buffer: &mut [u8],
-    ) -> Result<(), Self::Error>
-    where
-        B: IntoIterator<Item = u8>,
-    {
-        let mut res = self.setup(address.clone(), false, false);
-        if res.is_ok() {
-            res = self.write(bytes);
-        }
-        if res.is_ok() {
-            res = self.setup(address, true, true);
-        }
-        if res.is_ok() {
-            res = self.read(buffer);
-        }
-        self.stop();
-        res
-    }
-}
-impl<A, P, SMI, SDA, SCL> i2c::WriteRead<A> for I2C<'_, P, SMI, SDA, SCL>
-where
-    A: AddressMode + Into<u16> + Clone + 'static,
-    P: PIOExt,
-    SMI: StateMachineIndex,
-    SDA: AnyPin,
-    SCL: AnyPin,
-{
-    type Error = Error;
+        queue: impl IntoIterator<Item = CmdWord<'b>>,
+    ) -> Result<(), Error> {
+        let mut output = queue.into_iter().peekable();
+        // P::TX_FIFO_DEPTH
+        let mut input: Deque<CmdWord<'b>, 16> = Deque::new();
 
-    fn write_read(
-        &mut self,
-        address: A,
-        bytes: &[u8],
-        buffer: &mut [u8],
-    ) -> Result<(), Self::Error> {
-        <Self as i2c::WriteIterRead<A>>::write_iter_read(
-            self,
-            address,
-            bytes.iter().cloned(),
-            buffer,
-        )
-    }
-}
-
-impl<A, P, SMI, SDA, SCL> i2c::TransactionalIter<A> for I2C<'_, P, SMI, SDA, SCL>
-where
-    A: AddressMode + Into<u16> + Clone + 'static,
-    P: PIOExt,
-    SMI: StateMachineIndex,
-    SDA: AnyPin,
-    SCL: AnyPin,
-{
-    type Error = Error;
-
-    fn exec_iter<'a, O>(&mut self, address: A, operations: O) -> Result<(), Self::Error>
-    where
-        O: IntoIterator<Item = Operation<'a>>,
-    {
-        let mut res = Ok(());
-        let mut first = true;
-        for op in operations {
-            match op {
-                Operation::Read(buf) => {
-                    res = self.setup(address.clone(), true, !first);
-                    if res.is_ok() {
-                        res = self.read(buf);
-                    }
+        // while we’re not does sending/receiving
+        while output.peek().is_some() || !input.is_empty() {
+            // if there is room in the tx fifo
+            if !self.tx.is_full() {
+                if let Some(mut word) = output.next() {
+                    let last = matches!(
+                        (&mut word, output.peek()),
+                        (CmdWord::Data(_), None) | (CmdWord::Data(_), Some(CmdWord::Raw(_)))
+                    );
+                    let word_u16 = word.encode(last);
+                    self.tx.write_u16_replicated(word_u16);
+                    input.push_back(word).expect("`input` is not full");
                 }
-                Operation::Write(buf) => {
-                    res = self.setup(address.clone(), false, !first);
-                    if res.is_ok() {
-                        res = self.write(buf.iter().cloned());
+            }
+
+            if let Some(word) = self.rx.read() {
+                let word = (word & 0xFF) as u8;
+                loop {
+                    match input.pop_front() {
+                        Some(CmdWord::Raw(_)) => continue,
+                        Some(CmdWord::Data(d)) => match d.byte {
+                            Left(exp) if word != exp => {
+                                return self.err_with(Error::BusContention);
+                            }
+                            Right(inp) => *inp = word,
+                            _ => {}
+                        },
+                        None => {}
                     }
-                }
-            };
-            if res.is_err() {
-                break;
-            }
-            first = false;
-        }
-        self.stop();
-        res
-    }
-}
-
-impl<A, P, SMI, SDA, SCL> i2c::Transactional<A> for I2C<'_, P, SMI, SDA, SCL>
-where
-    A: AddressMode + Into<u16> + Clone + 'static,
-    P: PIOExt,
-    SMI: StateMachineIndex,
-    SDA: AnyPin,
-    SCL: AnyPin,
-{
-    type Error = Error;
-
-    fn exec(&mut self, address: A, operations: &mut [Operation<'_>]) -> Result<(), Self::Error> {
-        let mut res = Ok(());
-        let mut first = true;
-        for op in operations {
-            match op {
-                Operation::Read(buf) => {
-                    res = self.setup(address.clone(), true, !first);
-                    if res.is_ok() {
-                        res = self.read(buf);
-                    }
-                }
-                Operation::Write(buf) => {
-                    res = self.setup(address.clone(), false, !first);
-                    if res.is_ok() {
-                        res = self.write(buf.iter().cloned());
-                    }
-                }
-            };
-            if res.is_err() {
-                break;
-            }
-            first = false;
-        }
-        self.stop();
-        res
-    }
-}
-
-#[cfg(feature = "eh1_0_alpha")]
-mod eh1_0_alpha {
-    use eh1_0_alpha::i2c::{AddressMode, ErrorKind, NoAcknowledgeSource, Operation};
-
-    use crate::Error;
-
-    use super::{AnyPin, PIOExt, StateMachineIndex, I2C};
-
-    impl<P, SMI, SDA, SCL> I2C<'_, P, SMI, SDA, SCL>
-    where
-        P: PIOExt,
-        SMI: StateMachineIndex,
-        SDA: AnyPin,
-        SCL: AnyPin,
-    {
-        pub fn write_iter<B, A>(&mut self, address: A, bytes: B) -> Result<(), Error>
-        where
-            A: AddressMode + Into<u16> + Clone + 'static,
-            B: IntoIterator<Item = u8>,
-        {
-            let mut res = self.setup(address, false, false);
-            if res.is_ok() {
-                res = self.write(bytes);
-            }
-            self.stop();
-            res
-        }
-
-        pub fn write_iter_read<A, B>(
-            &mut self,
-            address: A,
-            bytes: B,
-            buffer: &mut [u8],
-        ) -> Result<(), Error>
-        where
-            A: AddressMode + Into<u16> + Clone + 'static,
-            B: IntoIterator<Item = u8>,
-        {
-            let mut res = self.setup(address.clone(), false, false);
-            if res.is_ok() {
-                res = self.write(bytes);
-            }
-            if res.is_ok() {
-                res = self.setup(address, true, true);
-            }
-            if res.is_ok() {
-                res = self.read(buffer);
-            }
-            self.stop();
-            res
-        }
-
-        pub fn transaction_iter<'a, A, O>(&mut self, address: A, operations: O) -> Result<(), Error>
-        where
-            A: AddressMode + Into<u16> + Clone + 'static,
-            O: IntoIterator<Item = Operation<'a>>,
-        {
-            let mut res = Ok(());
-            let mut first = true;
-            for op in operations {
-                match op {
-                    Operation::Read(buf) => {
-                        res = self.setup(address.clone(), true, !first);
-                        if res.is_ok() {
-                            res = self.read(buf);
-                        }
-                    }
-                    Operation::Write(buf) => {
-                        res = self.setup(address.clone(), false, !first);
-                        if res.is_ok() {
-                            res = self.write(buf.iter().cloned());
-                        }
-                    }
-                };
-                if res.is_err() {
                     break;
                 }
-                first = false;
-            }
-            self.stop();
-            res
-        }
-    }
-
-    impl eh1_0_alpha::i2c::Error for super::Error {
-        fn kind(&self) -> ErrorKind {
-            match self {
-                Error::NoAcknowledgeAddress => {
-                    ErrorKind::NoAcknowledge(NoAcknowledgeSource::Address)
-                }
-                Error::NoAcknowledgeData => ErrorKind::NoAcknowledge(NoAcknowledgeSource::Data),
-            }
-        }
-    }
-
-    impl<P, SMI, SDA, SCL> eh1_0_alpha::i2c::ErrorType for I2C<'_, P, SMI, SDA, SCL>
-    where
-        P: PIOExt,
-        SMI: StateMachineIndex,
-        SDA: AnyPin,
-        SCL: AnyPin,
-    {
-        type Error = super::Error;
-    }
-
-    impl<A, P, SMI, SDA, SCL> eh1_0_alpha::i2c::I2c<A> for I2C<'_, P, SMI, SDA, SCL>
-    where
-        A: AddressMode + Into<u16> + Clone + 'static,
-        P: PIOExt,
-        SMI: StateMachineIndex,
-        SDA: AnyPin,
-        SCL: AnyPin,
-    {
-        fn read(&mut self, address: A, buffer: &mut [u8]) -> Result<(), Self::Error> {
-            let mut res = self.setup(address, true, false);
-            if res.is_ok() {
-                res = self.read(buffer);
-            }
-            self.stop();
-            res
-        }
-
-        fn write(&mut self, address: A, bytes: &[u8]) -> Result<(), Self::Error> {
-            self.write_iter(address, bytes.into_iter().cloned())
-        }
-
-        fn write_read(
-            &mut self,
-            address: A,
-            bytes: &[u8],
-            buffer: &mut [u8],
-        ) -> Result<(), Self::Error> {
-            self.write_iter_read(address, bytes.into_iter().cloned(), buffer)
-        }
-
-        fn transaction<'a>(
-            &mut self,
-            address: A,
-            operations: &mut [Operation<'a>],
-        ) -> Result<(), Self::Error> {
-            let mut res = Ok(());
-            let mut first = true;
-            for op in operations {
-                match op {
-                    Operation::Read(buf) => {
-                        res = self.setup(address.clone(), true, !first);
-                        if res.is_ok() {
-                            res = self.read(buf);
+            } else if self.has_errored() {
+                // the byte that err’ed isn’t in the rx fifo. Once we’re done clearing them, we
+                // know the head of the queue is the byte that failed.
+                loop {
+                    match input.pop_front() {
+                        // Raw cmd cannot fail
+                        Some(CmdWord::Raw(_)) => continue,
+                        Some(CmdWord::Data(d)) => {
+                            return self.err_with(if d.is_address {
+                                Error::NoAcknowledgeAddress
+                            } else {
+                                Error::NoAcknowledgeData
+                            });
+                        }
+                        None => {
+                            unreachable!("There cannot be a failure without a transmition")
                         }
                     }
-                    Operation::Write(buf) => {
-                        res = self.setup(address.clone(), false, !first);
-                        if res.is_ok() {
-                            res = self.write(buf.iter().cloned());
-                        }
-                    }
-                };
-                if res.is_err() {
-                    break;
                 }
-                first = false;
             }
-            self.stop();
-            res
         }
+        Ok(())
+    }
+}
+
+impl<'pio, P, SMI, SDA, SCL> I2C<'pio, P, SMI, SDA, SCL>
+where
+    P: PIOExt,
+    SMI: StateMachineIndex,
+    SDA: AnyPin,
+    SDA::Id: ValidFunction<SDA::Function>,
+    SCL: AnyPin,
+    SCL::Id: ValidFunction<SCL::Function>,
+{
+    fn reset_pin<I, F, T>(
+        (mut pin, override_): (Pin<I, P::PinFunction, PullUp>, OutputEnableOverride),
+    ) -> Pin<I, F, T>
+    where
+        I: PinId,
+        F: Function,
+        T: PullType,
+        I: ValidFunction<F>,
+    {
+        // Prevent glitches during reconfiguration
+        pin.set_output_enable_override(OutputEnableOverride::Disable);
+        // reconfigure the pin
+        let mut pin = pin.reconfigure();
+        // revert to normal operation
+        pin.set_output_enable_override(override_);
+        pin
+    }
+
+    /// Frees the state machine and pins.
+    #[allow(clippy::type_complexity)]
+    pub fn free(self) -> ((SDA::Type, SCL::Type), UninitStateMachine<(P, SMI)>) {
+        let Self {
+            pio,
+            sm,
+            tx,
+            rx,
+            sda,
+            scl,
+            ..
+        } = self;
+        let (uninit, program) = sm.uninit(rx, tx);
+        pio.uninstall(program);
+
+        let scl = Self::reset_pin(scl);
+        let sda = Self::reset_pin(sda);
+
+        ((sda, scl), uninit)
     }
 }
