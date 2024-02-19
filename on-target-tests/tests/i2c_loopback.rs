@@ -117,7 +117,14 @@ mod tests {
     }
 
     // Sad paths:
-    // Peripheral Nack
+    // Peripheral Nack on Addr
+    #[test]
+    fn nak_on_addr(state: &mut State) {
+        i2c_tests::blocking::nak_on_addr(state, ADDR_7BIT, ADDR_7BIT + 1);
+        i2c_tests::blocking::nak_on_addr(state, ADDR_10BIT, ADDR_10BIT + 1);
+        i2c_tests::blocking::nak_on_addr(state, ADDR_10BIT, ADDR_10BIT + 0x100);
+    }
+    // Peripheral Nack on Data
     //
     // Arbritration conflict
 }

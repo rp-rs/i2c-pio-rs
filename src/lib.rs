@@ -46,6 +46,7 @@ use either::Either::{Left, Right};
 use fugit::HertzU32;
 use heapless::Deque;
 use i2c_cmd::{restart, start, CmdWord, Data};
+use pio::Instruction;
 use rp2040_hal::{
     gpio::{
         AnyPin, Function, FunctionNull, OutputEnableOverride, Pin, PinId, PullType, PullUp,
@@ -102,7 +103,7 @@ fn setup<'b, A: ValidAddressMode>(
     let address = match A::address_len() {
         AddressLength::_7 => {
             let address_and_flag = ((address as u8) << 1) | read_flag;
-            Left([address_and_flag].into_iter().map(CmdWord::address))
+            Left(once(address_and_flag).into_iter().map(CmdWord::address))
         }
         AddressLength::_10 => {
             let addr_hi = 0xF0 | ((address >> 7) as u8) & 0xFE;
@@ -136,7 +137,7 @@ fn setup<'b, A: ValidAddressMode>(
     .chain(address)
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Error {
     NoAcknowledgeAddress,
@@ -327,16 +328,33 @@ where
         }
     }
 
-    fn has_errored(&mut self) -> bool {
+    fn has_irq(&mut self) -> bool {
         let mask = 1 << SMI::id();
         self.pio.get_irq_raw() & mask != 0
     }
 
     fn err_with(&mut self, err: Error) -> Result<(), Error> {
-        // clear fifos
-        self.sm.clear_fifos();
-        // resume pio driver
-        self.pio.clear_irq(1 << SMI::id());
+        // clear RX FiFo
+        while self.rx.read().is_some() {}
+        // Clear Tx FiFo
+        self.sm.drain_tx_fifo();
+        // wait for the state machine to either stall on pull or block on irq
+        self.tx.clear_stalled_flag();
+        while !(self.tx.has_stalled() || self.has_irq()) {}
+
+        // Clear OSR
+        if self.has_irq() {
+            self.sm.exec_instruction(Instruction {
+                operands: pio::InstructionOperands::OUT {
+                    destination: pio::OutDestination::NULL,
+                    bit_count: 16,
+                },
+                delay: 0,
+                side_set: None,
+            });
+            // resume pio driver
+            self.pio.clear_irq(1 << SMI::id());
+        }
         // generate stop condition
         self.generate_stop();
         Err(err)
@@ -346,9 +364,10 @@ where
         // this driver checks for acknoledge error and/or expects data back, so by the time a stop
         // is generated, the tx fifo should be empty.
         assert!(self.tx.is_empty(), "TX FIFO is empty");
-        for encoded in stop() {
+
+        stop().for_each(|encoded| {
             self.tx.write_u16_replicated(encoded);
-        }
+        });
         self.tx.clear_stalled_flag();
         while !self.tx.has_stalled() {}
     }
@@ -358,8 +377,10 @@ where
         queue: impl IntoIterator<Item = CmdWord<'b>>,
     ) -> Result<(), Error> {
         let mut output = queue.into_iter().peekable();
-        // P::TX_FIFO_DEPTH
-        let mut input: Deque<CmdWord<'b>, 16> = Deque::new();
+        // - TX FIFO depth (cmd waiting to be sent)
+        // - OSR
+        // - RX FIFO input waiting to be processed
+        let mut input: Deque<Data<'b>, 9> = Deque::new();
 
         // while we’re not does sending/receiving
         while output.peek().is_some() || !input.is_empty() {
@@ -372,45 +393,34 @@ where
                     );
                     let word_u16 = word.encode(last);
                     self.tx.write_u16_replicated(word_u16);
-                    input.push_back(word).expect("`input` is not full");
+                    if let CmdWord::Data(d) = word {
+                        input.push_back(d).expect("`input` is not full");
+                    }
                 }
             }
 
             if let Some(word) = self.rx.read() {
                 let word = (word & 0xFF) as u8;
-                loop {
-                    match input.pop_front() {
-                        Some(CmdWord::Raw(_)) => continue,
-                        Some(CmdWord::Data(d)) => match d.byte {
-                            Left(exp) if word != exp => {
-                                return self.err_with(Error::BusContention);
-                            }
-                            Right(inp) => *inp = word,
-                            _ => {}
-                        },
-                        None => {}
+                if let Some(d) = input.pop_front() {
+                    match d.byte {
+                        Left(exp) if word != exp => {
+                            return self.err_with(Error::BusContention);
+                        }
+                        Right(inp) => *inp = word,
+                        _ => {}
                     }
-                    break;
                 }
-            } else if self.has_errored() {
+            } else if self.has_irq() {
                 // the byte that err’ed isn’t in the rx fifo. Once we’re done clearing them, we
                 // know the head of the queue is the byte that failed.
-                loop {
-                    match input.pop_front() {
-                        // Raw cmd cannot fail
-                        Some(CmdWord::Raw(_)) => continue,
-                        Some(CmdWord::Data(d)) => {
-                            return self.err_with(if d.is_address {
-                                Error::NoAcknowledgeAddress
-                            } else {
-                                Error::NoAcknowledgeData
-                            });
-                        }
-                        None => {
-                            unreachable!("There cannot be a failure without a transmition")
-                        }
-                    }
-                }
+                let Some(d) = input.pop_front() else {
+                    unreachable!("There cannot be a failure without a transmition")
+                };
+                return self.err_with(if d.is_address {
+                    Error::NoAcknowledgeAddress
+                } else {
+                    Error::NoAcknowledgeData
+                });
             }
         }
         Ok(())

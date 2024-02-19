@@ -8,6 +8,7 @@ use hal::{
     pac::PIO0,
     pio::{PIOExt, UninitStateMachine, PIO, PIO0SM0},
 };
+use i2c_pio::Error;
 use rp2040_hal::{
     self as hal,
     clocks::init_clocks_and_plls,
@@ -545,5 +546,20 @@ pub fn embedded_hal<T: ValidAddress>(
     )
     .collect();
     assert_eq!(g, h);
+    test_teardown!(state, controller);
+}
+
+/// the address given must be different from each other.
+pub fn nak_on_addr<A: ValidAddress>(state: &mut State, addr_target: A, addr_ctrl: A) {
+    use embedded_hal::i2c::I2c;
+    let mut controller = test_setup(state, addr_target, false);
+
+    let samples1: FIFOBuffer = Generator::seq().take(25).collect();
+    assert_eq!(
+        controller.write(addr_ctrl, &samples1),
+        Err(Error::NoAcknowledgeAddress)
+    );
+
+    assert_vec_eq!([]);
     test_teardown!(state, controller);
 }
