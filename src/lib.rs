@@ -103,7 +103,7 @@ fn setup<'b, A: ValidAddressMode>(
     let address = match A::address_len() {
         AddressLength::_7 => {
             let address_and_flag = ((address as u8) << 1) | read_flag;
-            Left(once(address_and_flag).into_iter().map(CmdWord::address))
+            Left(once(address_and_flag).map(CmdWord::address))
         }
         AddressLength::_10 => {
             let addr_hi = 0xF0 | ((address >> 7) as u8) & 0xFE;
