@@ -1,0 +1,40 @@
+[package]
+edition = "2021"
+name = "on-target-tests"
+version = "0.1.0"
+publish = false
+
+[[test]]
+name = "i2c_loopback"
+harness = false
+
+[dependencies]
+i2c-pio = { path = "../", features = ["defmt"] }
+
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+embedded_hal_0_2 = { package = "embedded-hal", version = "0.2.5", features = [
+  "unproven",
+] }
+embedded-hal = "1.0.0"
+embedded-hal-async = "1.0.0"
+fugit = "0.3.5"
+
+defmt = "0.3"
+defmt-rtt = "0.4"
+defmt-test = "0.3.1"
+panic-probe = { version = "0.3", features = ["print-defmt"] }
+
+rp2040-hal = { version = "0.10.0", features = [
+  "critical-section-impl",
+  "defmt",
+  "rt",
+] }
+
+rp2040-boot2 = "0.3.0"
+critical-section = "1.0.0"
+heapless = { version = "0.8.0", features = [
+  "portable-atomic-critical-section",
+  "defmt-03",
+] }
+itertools = { version = "0.12.0", default-features = false }

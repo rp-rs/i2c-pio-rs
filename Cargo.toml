@@ -7,15 +7,18 @@ description = "I2C driver implementation using the RP2040's PIO peripheral."
 documentation = "https://docs.rs/i2c-pio"
 repository = "https://github.com/rp-rs/i2c-pio-rs"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[workspace]
+members = ["on-target-tests"]
 
 [dependencies]
 cortex-m = "0.7.3"
-eh1_0_alpha = { version = "=1.0.0-alpha.11", package = "embedded-hal", optional = true }
-embedded-hal = "0.2.6"
+embedded-hal = { version = "1.0.0" }
+embedded_hal_0_2 = { version = "0.2.6", package = "embedded-hal" }
 nb = "1.0.0"
 pio = "0.2.0"
 pio-proc = "0.2.0"
-rp2040-hal = "0.9.0"
+rp2040-hal = "0.10.0"
 fugit = "0.3.5"
 defmt = { version = "0.3.0", optional = true }
+either = { version = "1.10.0", default-features = false }
+heapless = { version = "0.8.0", default-features = false }
