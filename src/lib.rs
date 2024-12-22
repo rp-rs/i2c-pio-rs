@@ -427,7 +427,7 @@ where
     }
 }
 
-impl<'pio, P, SMI, SDA, SCL> I2C<'pio, P, SMI, SDA, SCL>
+impl<P, SMI, SDA, SCL> I2C<'_, P, SMI, SDA, SCL>
 where
     P: PIOExt,
     SMI: StateMachineIndex,
