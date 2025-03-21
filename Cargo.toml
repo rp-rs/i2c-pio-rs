@@ -53,3 +53,5 @@ debug = 2
 defmt = ["dep:defmt", "heapless/defmt-03", "embedded-hal-async/defmt-03"]
 i2c-write-iter = ["dep:i2c-write-iter"]
 
+[patch.crates-io]
+rp2040-hal = { git = "https://github.com/ithinuel/rp-hal", branch = "async-pio" }
