@@ -40,7 +40,10 @@
 //! (It's possible for the inversion to be done in this program,
 //! but costs 2 instructions: 1 for inversion, and one to cope
 //! with the side effect of the MOV on TX shift counter.)
-use core::iter::once;
+use core::{
+    cell::RefCell,
+    iter::{once, Peekable},
+};
 
 use either::Either::{Left, Right};
 use fugit::HertzU32;
@@ -53,8 +56,8 @@ use rp2040_hal::{
         ValidFunction,
     },
     pio::{
-        PIOExt, PinDir, PinState, Rx, ShiftDirection, StateMachine, StateMachineIndex, Tx,
-        UninitStateMachine, PIO,
+        PIOExt, PinDir, PinState, PioIRQ, Running, Rx, ShiftDirection, StateMachine,
+        StateMachineIndex, Tx, UninitStateMachine, PIO,
     },
 };
 
@@ -63,6 +66,8 @@ use crate::i2c_cmd::stop;
 mod eh0_2;
 mod eh1_0;
 mod i2c_cmd;
+
+mod utils;
 
 /// Length of an address.
 #[derive(Debug, PartialEq, Eq)]
@@ -106,25 +111,16 @@ fn setup<'b, A: ValidAddressMode>(
             Left(once(address_and_flag).map(CmdWord::address))
         }
         AddressLength::_10 => {
-            let addr_hi = 0xF0 | ((address >> 7) as u8) & 0xFE;
+            let addr_hi = 0xF0 | (((address & 0x0700) >> 7) as u8);
             let addr_lo = (address & 0xFF) as u8;
 
             Right(if read {
-                let full_addr = [addr_hi, addr_lo]
-                    .into_iter()
-                    .map(Data::address)
-                    .map(CmdWord::Data);
-                let read_addr =
-                    restart().chain(once(CmdWord::Data(Data::address(addr_hi | read_flag))));
-
-                Left(full_addr.chain(read_addr))
+                let addr_write = [addr_hi, addr_lo].into_iter().map(CmdWord::address);
+                let addr_read = once(addr_hi | read_flag).map(CmdWord::address);
+                Left(addr_write.chain(restart()).chain(addr_read))
             } else {
-                Right(
-                    [addr_hi | read_flag, addr_lo]
-                        .into_iter()
-                        .map(Data::address)
-                        .map(CmdWord::Data),
-                )
+                let address = [addr_hi | read_flag, addr_lo].into_iter();
+                Right(address.map(CmdWord::address))
             })
         }
     };
@@ -328,23 +324,30 @@ where
         }
     }
 
-    fn has_irq(&mut self) -> bool {
+    fn has_irq(pio: &mut PIO<P>) -> bool {
         let mask = 1 << SMI::id();
-        self.pio.get_irq_raw() & mask != 0
+        pio.get_irq_raw() & mask != 0
     }
 
-    fn err_with(&mut self, err: Error) -> Result<(), Error> {
-        // clear RX FiFo
-        while self.rx.read().is_some() {}
+    /// While this method contains some loop, none of them are expected to run for more than a few
+    /// cycles. This works for both sync & async operations.
+    fn err_with(
+        pio: &mut PIO<P>,
+        sm: &mut StateMachine<(P, SMI), Running>,
+        rx: &mut Rx<(P, SMI)>,
+        tx: &mut Tx<(P, SMI)>,
+    ) {
         // Clear Tx FiFo
-        self.sm.drain_tx_fifo();
+        sm.drain_tx_fifo();
+        // clear RX FiFo
+        while rx.read().is_some() {}
         // wait for the state machine to either stall on pull or block on irq
-        self.tx.clear_stalled_flag();
-        while !(self.tx.has_stalled() || self.has_irq()) {}
+        tx.clear_stalled_flag();
+        while !(tx.has_stalled() || Self::has_irq(pio)) {}
 
         // Clear OSR
-        if self.has_irq() {
-            self.sm.exec_instruction(Instruction {
+        if Self::has_irq(pio) {
+            sm.exec_instruction(Instruction {
                 operands: pio::InstructionOperands::OUT {
                     destination: pio::OutDestination::NULL,
                     bit_count: 16,
@@ -353,23 +356,73 @@ where
                 side_set: None,
             });
             // resume pio driver
-            self.pio.clear_irq(1 << SMI::id());
+            pio.clear_irq(1 << SMI::id());
         }
         // generate stop condition
-        self.generate_stop();
-        Err(err)
+        Self::generate_stop(tx);
     }
 
-    fn generate_stop(&mut self) {
-        // this driver checks for acknoledge error and/or expects data back, so by the time a stop
+    fn generate_stop(tx: &mut Tx<(P, SMI)>) {
+        // this driver checks for acknowledge error and/or expects data back, so by the time a stop
         // is generated, the tx fifo should be empty.
-        assert!(self.tx.is_empty(), "TX FIFO is empty");
+        assert!(tx.is_empty(), "TX FIFO is empty");
 
         stop().for_each(|encoded| {
-            self.tx.write_u16_replicated(encoded);
+            tx.write_u16_replicated(encoded);
         });
-        self.tx.clear_stalled_flag();
-        while !self.tx.has_stalled() {}
+        tx.clear_stalled_flag();
+        while !tx.has_stalled() {}
+    }
+
+    // - TX FIFO depth (cmd waiting to be sent)
+    // - OSR
+    // - RX FIFO input waiting to be processed
+    fn process_queue_steps<'b>(
+        &mut self,
+        output: &mut Peekable<impl Iterator<Item = CmdWord<'b>>>,
+        input: &mut Deque<Data<'b>, 9>,
+    ) -> Result<(), Error> {
+        // if there is room in the tx fifo
+        if !self.tx.is_full() {
+            if let Some(mut word) = output.next() {
+                let last = matches!(
+                    (&mut word, output.peek()),
+                    (CmdWord::Data(_), None) | (CmdWord::Data(_), Some(CmdWord::Raw(_)))
+                );
+                let word_u16 = word.encode(last);
+                self.tx.write_u16_replicated(word_u16);
+                if let CmdWord::Data(d) = word {
+                    input.push_back(d).expect("`input` is not full");
+                }
+            }
+        }
+
+        if let Some(word) = self.rx.read() {
+            let word = (word & 0xFF) as u8;
+            if let Some(d) = input.pop_front() {
+                match d.byte {
+                    Left(exp) if word != exp => {
+                        Self::err_with(self.pio, &mut self.sm, &mut self.rx, &mut self.tx);
+                        return Err(Error::BusContention);
+                    }
+                    Right(inp) => *inp = word,
+                    _ => {}
+                }
+            }
+        } else if Self::has_irq(self.pio) {
+            // the byte that err’ed isn’t in the rx fifo. Once we’re done clearing them, we
+            // know the head of the queue is the byte that failed.
+            let Some(d) = input.pop_front() else {
+                unreachable!("There cannot be a failure without a transmission")
+            };
+            Self::err_with(self.pio, &mut self.sm, &mut self.rx, &mut self.tx);
+            return Err(if d.is_address {
+                Error::NoAcknowledgeAddress
+            } else {
+                Error::NoAcknowledgeData
+            });
+        }
+        Ok(())
     }
 
     fn process_queue<'b>(
@@ -377,53 +430,112 @@ where
         queue: impl IntoIterator<Item = CmdWord<'b>>,
     ) -> Result<(), Error> {
         let mut output = queue.into_iter().peekable();
-        // - TX FIFO depth (cmd waiting to be sent)
-        // - OSR
-        // - RX FIFO input waiting to be processed
-        let mut input: Deque<Data<'b>, 9> = Deque::new();
+        let mut input = Deque::new();
 
-        // while we’re not does sending/receiving
+        // while we’re not done sending/receiving
         while output.peek().is_some() || !input.is_empty() {
-            // if there is room in the tx fifo
-            if !self.tx.is_full() {
-                if let Some(mut word) = output.next() {
-                    let last = matches!(
-                        (&mut word, output.peek()),
-                        (CmdWord::Data(_), None) | (CmdWord::Data(_), Some(CmdWord::Raw(_)))
-                    );
-                    let word_u16 = word.encode(last);
-                    self.tx.write_u16_replicated(word_u16);
-                    if let CmdWord::Data(d) = word {
-                        input.push_back(d).expect("`input` is not full");
-                    }
-                }
-            }
+            self.process_queue_steps(&mut output, &mut input)?;
+        }
+        Ok(())
+    }
 
-            if let Some(word) = self.rx.read() {
-                let word = (word & 0xFF) as u8;
-                if let Some(d) = input.pop_front() {
-                    match d.byte {
-                        Left(exp) if word != exp => {
-                            return self.err_with(Error::BusContention);
-                        }
-                        Right(inp) => *inp = word,
-                        _ => {}
-                    }
+    async fn receive(
+        in_flight: &RefCell<Deque<Data<'_>, 10>>,
+        rx: &mut Rx<(P, SMI)>,
+    ) -> Result<(), Error> {
+        while !in_flight.borrow().is_empty() {
+            let word = (rx.async_read(PioIRQ::Irq0).await & 0xFF) as u8;
+            let Some(expected) = in_flight.borrow_mut().pop_front() else {
+                unreachable!("We cannot receive more data than requested");
+            };
+            //defmt::trace!("received: {}->{:x}", expected, word);
+            match expected.byte {
+                Left(exp) if word != exp => {
+                    return Err(Error::BusContention);
                 }
-            } else if self.has_irq() {
-                // the byte that err’ed isn’t in the rx fifo. Once we’re done clearing them, we
-                // know the head of the queue is the byte that failed.
-                let Some(d) = input.pop_front() else {
-                    unreachable!("There cannot be a failure without a transmition")
-                };
-                return self.err_with(if d.is_address {
-                    Error::NoAcknowledgeAddress
-                } else {
-                    Error::NoAcknowledgeData
-                });
+                Right(inp) => *inp = word,
+                _ => {}
             }
         }
         Ok(())
+    }
+
+    async fn transmit<'b>(
+        in_flight: &RefCell<Deque<Data<'b>, 10>>,
+        queue: impl IntoIterator<Item = CmdWord<'b>>,
+        tx: &mut Tx<(P, SMI)>,
+    ) {
+        let mut output = queue.into_iter().peekable();
+        while let Some(mut word) = output.next() {
+            let last = matches!(
+                (&mut word, output.peek()),
+                (CmdWord::Data(_), None) | (CmdWord::Data(_), Some(CmdWord::Raw(_)))
+            );
+            let word_u16 = word.encode(last);
+            tx.async_write_u16_replicated(PioIRQ::Irq0, word_u16).await;
+            if let CmdWord::Data(d) = word {
+                in_flight
+                    .borrow_mut()
+                    .push_back(d)
+                    .expect("`input` is full");
+            }
+        }
+    }
+
+    async fn process_queue_async<'b>(
+        &mut self,
+        queue: impl IntoIterator<Item = CmdWord<'b>>,
+    ) -> Result<(), Error> {
+        use futures::FutureExt;
+        // the Deque size should be { PIO::TX_FIFO_SIZE + 1 } but we can’t use const generics in
+        // there yet.
+        let in_flight = RefCell::new(Deque::new());
+
+        // wrap the TX in a RefCell to allow for mutable borrows in async closures
+        // There might be better solutions to this, but this is the simplest one that works.
+        let ref_tx = RefCell::new(&mut self.tx);
+
+        assert_eq!(self.rx.read(), None, "RX FIFO should be empty");
+
+        #[allow(clippy::await_holding_refcell_ref)]
+        let fut = core::pin::pin!(async {
+            // this refcell borrow is kept through an await point. The other reference is passed to
+            // the cancel guard which is only used *if* the future is cancelled.
+            let tx = &mut *ref_tx.borrow_mut();
+            let rx = &mut self.rx;
+            let mut irq = self.pio.irq0();
+            futures::select_biased! {
+                _ = futures::future::join(
+                    Self::transmit(&in_flight, queue, tx),
+                    Self::receive(&in_flight, rx)
+                ).fuse() => Ok(()),
+                _ = irq.sm_interrupt(SMI::id() as u8).fuse() => {
+                    // the byte that err’ed isn’t in the rx fifo. Once we’re done clearing them, we
+                    // know the head of the queue is the byte that failed.
+                    let mut in_flight = in_flight.borrow_mut();
+
+                    let Some(d) = in_flight.pop_front() else {
+                        unreachable!("There cannot be a failure without a transmission")
+                    };
+
+                    Self::err_with(self.pio, &mut self.sm, rx, tx);
+                    // Purge the rx fifo
+                    while rx.read().is_some() {}
+                    Err(if d.is_address {
+                        Error::NoAcknowledgeAddress
+                    } else {
+                        Error::NoAcknowledgeData
+                    })
+                }
+            }
+        });
+
+        // wrap all the futures in a cancel guard to make sure a Stop condition is generated and
+        // that the state machine is left in a clean state.
+        crate::utils::CancelGuard::new(&ref_tx, fut, |me: &RefCell<&mut Tx<(P, SMI)>>| {
+            Self::generate_stop(*me.borrow_mut());
+        })
+        .await
     }
 }
 

@@ -87,7 +87,7 @@ impl defmt::Format for Data<'_> {
             Left(b) => defmt::write!(fmt, "{:x}", b),
             Right(_) => defmt::write!(fmt, "…"),
         }
-        defmt::write!(fmt, " }}");
+        defmt::write!(fmt, ", is_addr: {} }}", self.is_address);
     }
 }
 #[derive(Debug)]
