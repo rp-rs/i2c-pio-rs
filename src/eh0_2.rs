@@ -13,7 +13,7 @@ where
     fn read(&mut self, address: A, buffer: &mut [u8]) -> Result<(), Self::Error> {
         let iter = super::setup(address, true, false).chain(buffer.iter_mut().map(CmdWord::read));
         self.process_queue(iter)?;
-        self.generate_stop();
+        Self::generate_stop(&mut self.tx);
         Ok(())
     }
 }
@@ -34,7 +34,7 @@ where
     {
         let iter = super::setup(address, false, false).chain(bytes.into_iter().map(CmdWord::write));
         self.process_queue(iter)?;
-        self.generate_stop();
+        Self::generate_stop(&mut self.tx);
         Ok(())
     }
 }
@@ -78,7 +78,7 @@ where
                 .chain(super::setup(address, true, true))
                 .chain(buffer.iter_mut().map(CmdWord::read)),
         )?;
-        self.generate_stop();
+        Self::generate_stop(&mut self.tx);
         Ok(())
     }
 }
@@ -135,7 +135,7 @@ where
             self.process_queue(iter)?;
             first = false;
         }
-        self.generate_stop();
+        Self::generate_stop(&mut self.tx);
         Ok(())
     }
 }
@@ -165,7 +165,7 @@ where
             self.process_queue(iter)?;
             first = false;
         }
-        self.generate_stop();
+        Self::generate_stop(&mut self.tx);
         Ok(())
     }
 }
