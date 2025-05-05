@@ -22,16 +22,36 @@ fugit = "0.3.5"
 defmt = { version = "0.3.0", optional = true }
 either = { version = "1.10.0", default-features = false }
 heapless = { version = "0.8.0", default-features = false }
+futures = { version = "0.3.30", default-features = false, features = [
+  "async-await",
+] }
+embedded-hal-async = "1.0.0"
+i2c-write-iter = { version = "1.0.0", features = ["async"], optional = true }
 
 [profile.dev]
 codegen-units = 1
 incremental = false
 lto = 'fat'
 opt-level = 's'
+debug = 2
 
 [profile.test]
 codegen-units = 1
 incremental = false
 lto = 'fat'
-opt-level = 's'
+opt-level = 2
+debug = 2
 
+[profile.release]
+codegen-units = 1
+incremental = false
+lto = 'fat'
+opt-level = 's'
+debug = 2
+
+[features]
+defmt = ["dep:defmt", "heapless/defmt-03", "embedded-hal-async/defmt-03"]
+i2c-write-iter = ["dep:i2c-write-iter"]
+
+[patch.crates-io]
+rp2040-hal = { git = "https://github.com/ithinuel/rp-hal", branch = "async-pio" }
